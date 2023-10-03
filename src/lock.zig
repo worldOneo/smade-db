@@ -96,8 +96,7 @@ pub fn LockWriteState(comptime T: type, comptime DepMachine: type, comptime Crea
                     }
                 },
                 This.State.Release => |v| {
-                    const ver = v.lock.version.fetchAdd(1, std.atomic.Ordering.Release);
-                    std.debug.print("Unlocked to: {}", .{ver});
+                    _ = v.lock.version.fetchAdd(1, std.atomic.Ordering.Release);
                     return Drive{ .Complete = v.result };
                 },
             }

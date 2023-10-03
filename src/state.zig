@@ -169,35 +169,34 @@ test "bind machine" {
     try expect(machine.run() == 128);
 }
 
-const test_creator_t = Creator(i32, i32);
-fn test_integer_creator(state: *i32) i32 {
-    state.* += 1;
-    return state.*;
-}
-
 test "creator" {
-    var creator = Creator(i32, i32, test_integer_creator).create(0);
+    var creator = Creator(i32, i32, struct {
+        fn drive(state: *i32) i32 {
+            state.* += 1;
+            return state.*;
+        }
+    }.drive).create(0);
     try expect(creator.new() == 1);
     try expect(creator.new() == 2);
     try expect(creator.new() == 3);
     try expect(creator.new() == 4);
 }
 
-fn test_const() i32 {
-    return 2;
-}
-
 test "trivial machine" {
-    var machine = trivialMachine(i32, test_const);
+    var machine = trivialMachine(i32, struct {
+        fn drive() i32 {
+            return 2;
+        }
+    }.drive);
     try expect(machine.run() == 2);
 }
 
-fn test_add(dep: i32) i32 {
-    return dep + 2;
-}
-
 test "trivial dep machine" {
-    var machine = trivialDepMachine(i32, i32, test_add);
+    var machine = trivialDepMachine(i32, i32, struct {
+        fn drive(dep: i32) i32 {
+            return dep + 2;
+        }
+    }.drive);
     try expect(machine.run(2) == 4);
     try expect(machine.run(5) == 7);
 }
