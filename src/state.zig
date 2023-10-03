@@ -30,7 +30,7 @@ pub fn Machine(comptime State: type, comptime Result: type, comptime driver: fn 
                 Drive(State, Result).Complete => |value| return value,
                 Drive(State, Result).Incomplete => |state| this.state = state,
             }
-            return {};
+            return null;
         }
     };
 }
@@ -89,7 +89,7 @@ pub fn Creator(comptime Result: type, comptime State: type, comptime Fn: fn (*St
         const This = @This();
         const newf = Fn;
         state: State,
-        pub fn create(state: State) This {
+        pub fn init(state: State) This {
             return This{
                 .state = state,
             };
@@ -123,8 +123,12 @@ pub fn trivialDepMachine_fn(comptime Result: type, comptime Dep: type, comptime 
     }.f;
 }
 
-pub fn trivialDepMachine(comptime Dep: type, comptime Result: type, comptime Fn: fn (Dep) Result) DepMachine(void, Result, Dep, trivialDepMachine_fn(Result, Dep, Fn)) {
-    return DepMachine(void, Result, Dep, trivialDepMachine_fn(Result, Dep, Fn)).init({});
+pub fn TrivialDepMachine(comptime Dep: type, comptime Result: type, comptime Fn: fn (Dep) Result) type {
+    return DepMachine(void, Result, Dep, trivialDepMachine_fn(Result, Dep, Fn));
+}
+
+pub fn trivialDepMachine(comptime Dep: type, comptime Result: type, comptime Fn: fn (Dep) Result) TrivialDepMachine(Dep, Result, Fn) {
+    return TrivialDepMachine(Dep, Result, Fn).init({});
 }
 
 pub fn trivialCreator_fn(comptime Type: type) fn (*Type) Type {
@@ -135,8 +139,12 @@ pub fn trivialCreator_fn(comptime Type: type) fn (*Type) Type {
     }.f;
 }
 
-pub fn trivialCreator(comptime Type: type, value: Type) Creator(Type, Type, trivialCreator_fn(Type)) {
-    return Creator(Type, Type, trivialCreator_fn(Type)).create(value);
+pub fn TrivialCreator(comptime Type: type) type {
+    return Creator(Type, Type, trivialCreator_fn(Type));
+}
+
+pub fn trivialCreator(comptime Type: type, value: Type) TrivialCreator(type) {
+    return TrivialCreator(type).init(value);
 }
 
 const std = @import("std");
@@ -175,7 +183,7 @@ test "creator" {
             state.* += 1;
             return state.*;
         }
-    }.drive).create(0);
+    }.drive).init(0);
     try expect(creator.new() == 1);
     try expect(creator.new() == 2);
     try expect(creator.new() == 3);

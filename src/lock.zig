@@ -76,7 +76,7 @@ pub fn LockWriteState(comptime T: type, comptime DepMachine: type, comptime Crea
                         return Drive{ .Incomplete = self };
                     }
 
-                    if (v.lock.version.compareAndSwap(ver, ver + 1, std.atomic.Ordering.Monotonic, std.atomic.Ordering.Monotonic)) |_| {
+                    if (v.lock.version.tryCompareAndSwap(ver, ver + 1, std.atomic.Ordering.Monotonic, std.atomic.Ordering.Monotonic)) |_| {
                         return Drive{ .Incomplete = self };
                     }
 
@@ -119,12 +119,12 @@ pub fn OptLock(comptime T: type) type {
             return This{ .value = value, .version = Version.init(0) };
         }
 
-        fn ReadStateMachine(comptime DepMachine: type, comptime Result: type, comptime Creator: type) type {
+        pub fn ReadStateMachine(comptime DepMachine: type, comptime Result: type, comptime Creator: type) type {
             const LockRead = LockReadState(T, DepMachine, Creator, Result);
             return state.Machine(LockRead.State, Result, LockRead.drive);
         }
 
-        fn WriteStateMachine(comptime DepMachine: type, comptime Result: type, comptime Creator: type) type {
+        pub fn WriteStateMachine(comptime DepMachine: type, comptime Result: type, comptime Creator: type) type {
             const LockWrite = LockWriteState(T, DepMachine, Creator, Result);
             return state.Machine(LockWrite.State, Result, LockWrite.drive);
         }
@@ -151,21 +151,21 @@ fn test_incr(v: *i32) i32 {
 test "lock" {
     var lock = OptLock(i32).init(123);
     {
-        var extractor = state.trivialDepMachine(*const i32, i32, test_read);
-        var creator = state.trivialCreator(@TypeOf(extractor), extractor);
-        var machine = lock.read(@TypeOf(extractor), i32, @TypeOf(creator), creator);
+        const extractor = state.TrivialDepMachine(*const i32, i32, test_read);
+        const creator = state.TrivialCreator(extractor);
+        var machine = lock.read(extractor, i32, creator, creator.init(extractor.init({})));
         try std.testing.expect(machine.run() == 123);
     }
     {
-        var modifier = state.trivialDepMachine(*i32, i32, test_incr);
-        var creator = state.trivialCreator(@TypeOf(modifier), modifier);
-        var modmachine = lock.write(@TypeOf(modifier), i32, @TypeOf(creator), creator);
+        const modifier = state.TrivialDepMachine(*i32, i32, test_incr);
+        const creator = state.TrivialCreator(modifier);
+        var modmachine = lock.write(modifier, i32, creator, creator.init(modifier.init({})));
         try std.testing.expect(modmachine.run() == 124);
     }
     {
-        var extractor = state.trivialDepMachine(*const i32, i32, test_read);
-        var creator = state.trivialCreator(@TypeOf(extractor), extractor);
-        var machine = lock.read(@TypeOf(extractor), i32, @TypeOf(creator), creator);
+        const extractor = state.TrivialDepMachine(*const i32, i32, test_read);
+        const creator = state.TrivialCreator(extractor);
+        var machine = lock.read(extractor, i32, creator, creator.init(extractor.init({})));
         try std.testing.expect(machine.run() == 124);
     }
 }
