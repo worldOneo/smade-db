@@ -1,154 +1,150 @@
 const std = @import("std");
 
-const NoAlloc = 0xFF_FF_FF_FF_FF_FF_FF_FF;
+const pageSizeInBlocks = 4096;
+const bytesInPage = pageSizeInBlocks * 8;
 
-fn MinInt(comptime Max: u64) type {
-    return if (Max < 1 << 8) u8 else if (Max < 1 << 16) u16 else if (Max < 1 << 32) u32 else u64;
-}
-
-pub fn BumpAllocator(comptime Entries: u64) type {
-    const OffsetTy = MinInt(Entries);
-
+pub fn CachelineBlocker(comptime Size: u64) type {
     return struct {
-        mutex: std.Thread.Mutex,
-        stack_size: u32,
-        stack: [Entries]OffsetTy,
-        const This = @This();
-        pub fn init() This {
-            var a: [Entries]OffsetTy = undefined;
-            for (0..Entries) |i| {
-                a[i] = @intCast(i);
-            }
-            return This{
-                .mutex = std.Thread.Mutex{},
-                .stack_size = Entries,
-                .stack = a,
-            };
-        }
-
-        pub fn retrieveOffset(this: *This) u64 {
-            this.mutex.lock();
-            defer this.mutex.unlock();
-            if (this.stack_size <= 0) return NoAlloc;
-            const item = this.stack[this.stack_size - 1];
-            this.stack_size -= 1;
-            return item;
-        }
-
-        pub fn retireOffset(this: *This, offset: u64) void {
-            this.mutex.lock();
-            defer this.mutex.unlock();
-            this.stack[this.stack_size] = @intCast(offset);
-            this.stack_size += 1;
+        block: [Size]u8,
+        pub fn init() @This() {
+            return @This(){ .block = [_]u8{0} ** Size };
         }
     };
 }
 
-fn RevolverAllocator(comptime Slots: u64, comptime ItemsPerSlot: u64) type {
-    return struct {
-        const AllocTy = BumpAllocator(ItemsPerSlot);
-        allocators: [Slots]AllocTy,
-        const This = @This();
-        const LocalAllocator = struct {
-            const FreeStackSize = 8;
-            main: *This,
-            index: u64,
-            freestack: [FreeStackSize]u64,
-            freestacksize: u64,
+const Page = struct {
+    const Block = struct {
+        next: *allowzero @This(),
+    };
+    // Cacheline 1
+    thread_id: usize,
+    used: usize,
+    free_list: *allowzero Block,
+    bump_idx: usize,
+    next_page: *allowzero Page,
+    _block1: CachelineBlocker(24), // prevent false sharing
 
-            pub fn retrieveOffset(this: *@This()) u64 {
-                if (this.freestacksize > 0) {
-                    this.freestacksize -= 1;
-                    return this.freestack[this.freestacksize];
-                }
-                var item: u64 = NoAlloc;
-                for (0..Slots) |_| {
-                    this.index += 1;
-                    this.index %= Slots;
-                    item = this.main.allocators[this.index].retrieveOffset();
-                    if (item != NoAlloc) {
-                        break;
-                    }
-                }
-                if (item == NoAlloc) {
-                    return NoAlloc;
-                }
-                const itemAdjusted = item + this.index * ItemsPerSlot;
-                return itemAdjusted;
-            }
+    // Cacheline 2
+    thread_free: std.atomic.Atomic(*allowzero Block),
+    thread_freed: std.atomic.Atomic(usize),
+    _block2: CachelineBlocker(48), // prevent false sharing
 
-            pub fn retireOffset(this: *@This(), offset: u64) void {
-                if (this.freestacksize < FreeStackSize) {
-                    this.freestack[this.freestacksize] = offset;
-                    this.freestacksize += 1;
-                    return;
-                }
-                const index = offset / ItemsPerSlot;
-                this.main.allocators[index].retireOffset(offset - index * ItemsPerSlot);
-            }
+    data: [pageSizeInBlocks]Block,
 
-            pub fn deinit(this: *@This()) void {
-                for (0..this.freestacksize) |i| {
-                    const offset = this.freestack[i];
-                    const index = offset / ItemsPerSlot;
-                    this.main.allocators[index].retireOffset(offset - index * ItemsPerSlot);
-                }
-            }
+    const This = @This();
+
+    pub fn clear(this: *This) void {
+        this.* = .{
+            .thread_id = 0,
+            .used = 0,
+            .free_list = @ptrFromInt(0),
+            .bump_idx = 0,
+            .next_page = @ptrFromInt(0),
+            ._block1 = CachelineBlocker(24).init(),
+            .thread_free = std.atomic.Atomic(*allowzero Block).init(@ptrFromInt(0)),
+            .thread_freed = std.atomic.Atomic(usize).init(0),
+            ._block2 = CachelineBlocker(48).init(),
+            .data = [_]Block{.{ .next = @ptrFromInt(0) }} ** pageSizeInBlocks,
         };
-        pub fn init() This {
-            var revolver: [Slots]AllocTy = undefined;
-            for (0..Slots) |i| {
-                revolver[i] = AllocTy.init();
+    }
+
+    // blocks must be the same for all allocations
+    pub fn allocate(this: *This, comptime T: type, size: usize) ?*T {
+        this.used += 1;
+        std.debug.print("Allocating {}\n", .{size});
+        if (@intFromPtr(this.free_list) != 0) {
+            std.debug.print("From cache\n", .{});
+            const alloc = this.free_list;
+            this.free_list = this.free_list.next;
+            return @ptrCast(alloc);
+        }
+        if (this.bump_idx < pageSizeInBlocks) {
+            std.debug.print("From bump\n", .{});
+            var alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
+            this.bump_idx += size;
+            if (this.bump_idx <= pageSizeInBlocks) {
+                return @ptrCast(alloc);
             }
-            return This{ .allocators = revolver };
         }
-        pub fn localAllocator(this: *This) This.LocalAllocator {
-            return This.LocalAllocator{
-                .index = 0,
-                .main = this,
-                .freestack = undefined,
-                .freestacksize = 0,
-            };
+        const thread_reclaim = this.reclaimThreadFree();
+        if (@intFromPtr(thread_reclaim) != 0) {
+            std.debug.print("From threadlist\n", .{});
+            const alloc = thread_reclaim;
+            this.free_list = alloc.next;
+            return @ptrCast(alloc);
         }
-    };
+        this.used -= 1;
+        return null;
+    }
+
+    pub fn free(this: *This, ptr: *void) bool {
+        var block: *Block = @ptrCast(ptr);
+        if (@as(usize, std.Thread.getCurrentId()) == this.thread_id) {
+            block.next = this.free_list;
+            this.free_list = this.next;
+            this.used -= 1;
+            return this.isPageUnused();
+        }
+        block.next = this.thread_free.load(std.atomic.Ordering.Monotonic);
+        while (this.thread_free.tryCompareAndSwap(block.next, block, std.atomic.Ordering.Release, std.atomic.Ordering.Monotonic)) {
+            block.next = this.thread_free.load(std.atomic.Ordering.Monotonic);
+        }
+        _ = this.thread_freed.fetchAdd(1, std.atomic.Ordering.Monotonic);
+        return false;
+    }
+
+    fn reclaimThreadFree(this: *This) *allowzero Block {
+        return this.thread_free.swap(@ptrFromInt(0), std.atomic.Ordering.Acquire);
+    }
+
+    fn isPageUnused(this: *This) bool {
+        return this.used - this.thread_freed.load(std.atomic.Ordering.Monotonic) == 0;
+    }
+};
+
+const sizeClasses = 64;
+
+fn msbOnly(const_size: usize) usize {
+    var size = const_size;
+    size |= (size >> 1);
+    size |= (size >> 2);
+    size |= (size >> 4);
+    size |= (size >> 8);
+    size |= (size >> 16);
+    size |= (size >> 32);
+    return (size & ~(size >> 1));
 }
 
-test "alloc tree" {
-    const Treet = RevolverAllocator(12, 32);
-    var tree = Treet.init();
+fn blockCount(size: usize) usize {
+    var baseClass = msbOnly(size);
+    const stepSize = baseClass / 4;
+    const steps = ((size - baseClass) + stepSize - 1) / stepSize;
+    return baseClass + steps * stepSize;
+}
 
-    var now = try std.time.Timer.start();
-    const bench = struct {
-        fn benchmark(t: *Treet, ok: *std.atomic.Atomic(i32), failed: *std.atomic.Atomic(i32)) void {
-            var local_alloc = t.localAllocator();
-            defer local_alloc.deinit();
-            for (0..100000) |_| {
-                var a: [32]u64 = undefined;
-                for (0..32) |i| {
-                    a[i] = local_alloc.retrieveOffset();
-                    if (a[i] == NoAlloc) {
-                        _ = failed.fetchAdd(1, std.atomic.Ordering.Monotonic);
-                    } else {
-                        _ = ok.fetchAdd(1, std.atomic.Ordering.Monotonic);
-                    }
-                }
-                for (0..32) |i| {
-                    if (a[i] != NoAlloc) {
-                        local_alloc.retireOffset(a[i]);
-                    }
-                }
-            }
+const LocalAllocator = struct {};
+
+const GAllocator = struct {
+    pages: []Page,
+    const This = @This();
+
+    pub fn init(pages: u64, backing_allocator: std.mem.Allocator) std.mem.Allocator.Error!This {
+        std.debug.print("Starting {}\n", .{@sizeOf(Page)});
+        var heap_pages: []Page = try backing_allocator.alignedAlloc(Page, 64, pages);
+        for (0..pages) |i| {
+            heap_pages[i].clear();
         }
-    };
-    var threads: [6]std.Thread = undefined;
-    var ok = std.atomic.Atomic(i32).init(0);
-    var failed = std.atomic.Atomic(i32).init(0);
-    for (0..6) |i| {
-        threads[i] = try std.Thread.spawn(.{}, bench.benchmark, .{ &tree, &ok, &failed });
+        std.debug.print("alloced\n", .{});
+        return This{ .pages = heap_pages };
+        // return This{ .pages = heap_pages };
     }
-    for (0..6) |i| {
-        threads[i].join();
-    }
-    std.debug.print("Time: {}us = {d:.0} ops / core / sec\n", .{ now.read() / 1000, (100_000.0 * 32.0) / (@as(f64, @floatFromInt(now.read())) / 1_000_000_000.0) });
-    std.debug.print("{} ok and {} failed\n", .{ ok.load(std.atomic.Ordering.Monotonic), failed.load(std.atomic.Ordering.Monotonic) });
+};
+
+test "GAllocator" {
+    std.debug.print("Lul\n", .{});
+    var alloc = try GAllocator.init(10, std.heap.page_allocator);
+    var page = &alloc.pages[0];
+    _ = page.allocate([17]u8, blockCount(@sizeOf([17]u8)));
+
+    std.debug.print("Ok\n", .{});
 }
