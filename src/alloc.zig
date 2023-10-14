@@ -102,7 +102,7 @@ const Page = struct {
 
         this.used -= 1;
         var size_class: *SizeClass = @ptrCast(this.size_class);
-        return size_class.allocateSlow(T);
+        return size_class.allocateSlow(T, size);
     }
 
     pub fn collect(this: *This) void {
@@ -238,7 +238,7 @@ const SizeClass = struct {
         };
     }
 
-    pub fn add_page(this: *This, page: *Page) void {
+    fn add_page(this: *This, page: *Page) void {
         allocLog("thread {} adding page {} to size class {*}\n", .{ std.Thread.getCurrentId(), page, this });
         page.next_page = this.pages;
         page.prev_page = @ptrFromInt(0);
@@ -248,25 +248,27 @@ const SizeClass = struct {
         this.pages = page;
     }
 
-    pub fn allocate(this: *This, comptime T: type) ?*T {
-        const size = @sizeOf(T);
-        const filled_size = roundToClassSize(size);
+    pub fn allocateSized(this: *This, comptime T: type, n: usize) ?*T {
         // fastpath to claim first free item from the first page in the pool
         if (@intFromPtr(this.pages) != 0) {
             const page: *Page = @ptrCast(this.pages);
-            if (page.allocate(T, filled_size)) |allocated| {
+            if (page.allocate(T, n)) |allocated| {
                 allocLog("thread {} allocating fast in size class {*}\n", .{ std.Thread.getCurrentId(), this });
                 return allocated;
             }
         }
         allocLog("thread {} allocating slow in size class {*}\n", .{ std.Thread.getCurrentId(), this });
         // slow path called on a regular base to do all the work not needded to be done in the fast path
-        return this.allocateSlow(T);
+        return this.allocateSlow(T, n);
     }
 
-    fn allocateSlow(this: *This, comptime T: type) ?*T {
+    pub fn allocate(this: *This, comptime T: type) ?*T {
         const size = @sizeOf(T);
         const filled_size = roundToClassSize(size);
+        return this.allocateSized(T, filled_size);
+    }
+
+    fn allocateSlow(this: *This, comptime T: type, n: usize) ?*T {
         // reclaim previously full pages on which an async free happened
         this.deferedFrees();
 
@@ -284,12 +286,12 @@ const SizeClass = struct {
             } else if (@intFromPtr(page.free_list) != 0) {
                 allocLog("thread {} allocating slow in size class {*} fast for page {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // This page can be used to allocate data
-                return page.allocate(T, filled_size);
+                return page.allocate(T, n);
             } else {
                 allocLog("thread {} allocating slow in size class {*} marking page full {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // put page in full mode for deffered reclamation
                 if (!page.markFull()) {
-                    return page.allocate(T, filled_size);
+                    return page.allocate(T, n);
                 } else {
                     // unlink full page for deffered reclamation
                     if (@intFromPtr(page.prev_page) != 0) {
@@ -319,7 +321,7 @@ const SizeClass = struct {
                 page.prev_page = new_page;
             }
             this.pages = new_page;
-            return new_page.allocate(T, filled_size);
+            return new_page.allocate(T, n);
         }
         allocLog("thread {} allocating slow in size class {*} OOM\n", .{ std.Thread.getCurrentId(), this });
 
@@ -375,7 +377,7 @@ fn sizeClassOf(size: usize) usize {
     return (63 - @clz(baseClass >> 3)) * 4 + steps;
 }
 
-const LocalAllocator = struct {
+pub const LocalAllocator = struct {
     class_pages: [sizeClasses]SizeClass,
     global_allocator: *GlobalAllocator,
     const This = @This();
@@ -406,15 +408,26 @@ const LocalAllocator = struct {
         const class = sizeClassOf(size);
         return this.class_pages[class].allocate(T);
     }
+
+    pub fn allocateSlice(this: *This, comptime T: type, n: usize) ?[]T {
+        const size = roundToClassSize(@sizeOf(T) * n);
+        const class = sizeClassOf(size);
+        const ptr = this.class_pages[class].allocateSized(T, class).?;
+        const slice: [*]T = @ptrCast(ptr);
+        return slice[0..size];
+    }
+
+    pub fn freeSlice(this: *This, comptime T: type, slice: []T) void {
+        this.free(T, @as(*T, @ptrCast(slice.ptr)));
+    }
 };
 
-const GlobalAllocator = struct {
+pub const GlobalAllocator = struct {
     pages: []Page,
     free_pages: std.atomic.Atomic(*allowzero Page),
     const This = @This();
 
     pub fn init(pages: u64, backing_allocator: std.mem.Allocator) std.mem.Allocator.Error!This {
-        std.debug.print("Starting {}\n", .{@sizeOf(Page)});
         // 64byte min allignment for known cache line allignment
         var heap_pages: []Page = try backing_allocator.alignedAlloc(Page, 64, pages);
         // null out pages
@@ -425,7 +438,6 @@ const GlobalAllocator = struct {
         for (0..pages - 1) |i| {
             heap_pages[i].next_page = &heap_pages[i + 1];
         }
-        std.debug.print("alloced\n", .{});
         return This{
             .pages = heap_pages,
             .free_pages = std.atomic.Atomic(*allowzero Page).init(&heap_pages[0]),
