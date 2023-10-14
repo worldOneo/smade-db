@@ -3,6 +3,19 @@ const std = @import("std");
 const pageSizeInBlocks = 4096;
 const bytesInPage = pageSizeInBlocks * 8;
 
+const AllocLogging = enum {
+    Enabled,
+    Disabled,
+};
+
+const logging: AllocLogging = .Disabled;
+
+fn allocLog(comptime fmt: []const u8, args: anytype) void {
+    if (logging == .Enabled) {
+        std.debug.print(fmt, args);
+    }
+}
+
 pub fn CachelineBlocker(comptime Size: u64) type {
     return struct {
         block: [Size]u8,
@@ -37,8 +50,7 @@ const Page = struct {
 
     // Cacheline 2
     thread_free: std.atomic.Atomic(*allowzero align(1) Block),
-    thread_freed: std.atomic.Atomic(usize),
-    _block2: CachelineBlocker(48), // prevent false sharing
+    _block2: CachelineBlocker(56), // prevent false sharing
 
     data: [pageSizeInBlocks]Block,
 
@@ -58,8 +70,7 @@ const Page = struct {
 
             // CL 2
             .thread_free = std.atomic.Atomic(*allowzero align(1) Block).init(@ptrFromInt(0)),
-            .thread_freed = std.atomic.Atomic(usize).init(0),
-            ._block2 = CachelineBlocker(48).init(),
+            ._block2 = CachelineBlocker(56).init(),
 
             // Data
             .data = [_]Block{.{ .next = @ptrFromInt(0) }} ** pageSizeInBlocks,
@@ -75,25 +86,33 @@ const Page = struct {
     pub fn allocate(this: *This, comptime T: type, size: usize) ?*T {
         this.used += 1;
         if (@intFromPtr(this.free_list) != 0) {
-            const alloc = this.local_free_list;
-            this.local_free_list = this.local_free_list.next;
+            allocLog("thread {} allocating size {} for page {*} from free list\n", .{ std.Thread.getCurrentId(), size, this });
+            const alloc = this.free_list;
+            this.free_list = this.free_list.next;
             return @ptrCast(alloc);
         }
         if (this.bump_idx < pageSizeInBlocks and this.bump_idx + size <= pageSizeInBlocks) {
+            allocLog("thread {} allocating size {} for page {*} from bump\n", .{ std.Thread.getCurrentId(), size, this });
             var alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
             this.bump_idx += size;
             if (this.bump_idx <= pageSizeInBlocks) {
                 return @ptrCast(alloc);
             }
         }
-        
+
         this.used -= 1;
         var size_class: *SizeClass = @ptrCast(this.size_class);
         return size_class.allocateSlow(T);
     }
 
     pub fn collect(this: *This) void {
-        this.free_list = this.local_free_list;
+        allocLog("thread {} collecting page {*}\n", .{ std.Thread.getCurrentId(), this });
+
+        if (@intFromPtr(this.free_list) != 0) {
+            this.free_list.next = this.local_free_list;
+        } else {
+            this.free_list = this.local_free_list;
+        }
         this.local_free_list = @ptrFromInt(0);
 
         const thread_reclaim = this.reclaimThreadFree();
@@ -107,27 +126,37 @@ const Page = struct {
             }
             tail.next = this.free_list;
             this.free_list = head;
+            this.used -= count;
+            allocLog("thread {} collecting page {*} collecting from threaded {}\n", .{ std.Thread.getCurrentId(), this, count });
         }
     }
 
     pub fn free(this: *This, comptime T: type, ptr: *T) bool {
+        allocLog("thread {} freeing {*} in page {*} of thread {}\n", .{ std.Thread.getCurrentId(), ptr, this, this.thread_id });
         var block: *align(1) Block = @ptrCast(ptr);
         if (@as(usize, std.Thread.getCurrentId()) == this.thread_id) {
+            allocLog("thread {} local free {*} in {*}\n", .{ std.Thread.getCurrentId(), ptr, this });
+
             // local free
             block.next = this.local_free_list;
             this.local_free_list = block;
             this.used -= 1;
 
             if (this.bump_idx == bumpMarkerFullPage) {
-                // return page to available to allocate state
-                var size_class: *SizeClass = @ptrCast(this.size_class);
-                size_class.add_page(this);
+                allocLog("thread {} local marking {*} as local normal page\n", .{ std.Thread.getCurrentId(), this });
                 this.bump_idx -= 1;
+
+                if (this.thread_free.tryCompareAndSwap(@ptrFromInt(@intFromEnum(PageStates.FULL)), @ptrFromInt(@intFromEnum(PageStates.NORMAL)), std.atomic.Ordering.Monotonic, std.atomic.Ordering.Monotonic)) |_| {
+                    allocLog("thread {} local marking {*} as thread normal page\n", .{ std.Thread.getCurrentId(), this });
+                    // return page to available to allocate state
+                    var size_class: *SizeClass = @ptrCast(this.size_class);
+                    size_class.add_page(this);
+                }
             }
             return this.isPageUnused();
         }
 
-        // push to thread free
+        allocLog("thread {} thread freeing in {*}\n", .{ std.Thread.getCurrentId(), this });
         while (true) {
             block.next = this.thread_free.load(std.atomic.Ordering.Monotonic);
             // page is in full mode
@@ -143,7 +172,6 @@ const Page = struct {
                 break;
             }
         }
-        _ = this.thread_freed.fetchAdd(1, std.atomic.Ordering.Monotonic);
         return false;
     }
 
@@ -157,7 +185,7 @@ const Page = struct {
     }
 
     fn isPageUnused(this: *This) bool {
-        return this.used - this.thread_freed.load(std.atomic.Ordering.Monotonic) == 0;
+        return this.used == 0;
     }
 
     pub fn markFull(this: *This) bool {
@@ -177,6 +205,8 @@ const Page = struct {
             // this page was already added to the thread local heap
             return false;
         }
+        allocLog("thread {} defered freeing {*}\n", .{ std.Thread.getCurrentId(), this });
+
         // atomically push to thread_delayed stack
         while (true) {
             const head = this.size_class.thread_delayed.load(std.atomic.Ordering.Monotonic);
@@ -185,6 +215,7 @@ const Page = struct {
                 break;
             }
         }
+        allocLog("thread {} thread marking normal {*}\n", .{ std.Thread.getCurrentId(), this });
         // return page to normal operation
         this.thread_free.store(@ptrFromInt(@intFromEnum(PageStates.NORMAL)), std.atomic.Ordering.Monotonic);
         return true;
@@ -208,7 +239,9 @@ const SizeClass = struct {
     }
 
     pub fn add_page(this: *This, page: *Page) void {
+        allocLog("thread {} adding page {} to size class {*}\n", .{ std.Thread.getCurrentId(), page, this });
         page.next_page = this.pages;
+        page.prev_page = @ptrFromInt(0);
         if (@intFromPtr(this.pages) != 0) {
             this.pages.prev_page = page;
         }
@@ -217,15 +250,16 @@ const SizeClass = struct {
 
     pub fn allocate(this: *This, comptime T: type) ?*T {
         const size = @sizeOf(T);
-        const class = sizeClassOf(size);
         const filled_size = roundToClassSize(size);
-        const page = this.class_pages[class];
         // fastpath to claim first free item from the first page in the pool
-        if (@intFromPtr(page) != 0) {
+        if (@intFromPtr(this.pages) != 0) {
+            const page: *Page = @ptrCast(this.pages);
             if (page.allocate(T, filled_size)) |allocated| {
+                allocLog("thread {} allocating fast in size class {*}\n", .{ std.Thread.getCurrentId(), this });
                 return allocated;
             }
         }
+        allocLog("thread {} allocating slow in size class {*}\n", .{ std.Thread.getCurrentId(), this });
         // slow path called on a regular base to do all the work not needded to be done in the fast path
         return this.allocateSlow(T);
     }
@@ -236,19 +270,23 @@ const SizeClass = struct {
         // reclaim previously full pages on which an async free happened
         this.deferedFrees();
 
-        var page: *Page = @ptrCast(this.pages);
+        var maybe_page = this.pages;
 
         // Collect local pages
-        while (@intFromPtr(page) != 0) {
+        while (@intFromPtr(maybe_page) != 0) {
+            var page: *Page = @ptrCast(maybe_page);
             page.collect();
 
             if (page.isPageUnused()) {
+                allocLog("thread {} allocating slow in size class {*} freeing page {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // return this page for reuse anywhere else
                 this.global_allocator.freePage(page);
             } else if (@intFromPtr(page.free_list) != 0) {
+                allocLog("thread {} allocating slow in size class {*} fast for page {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // This page can be used to allocate data
                 return page.allocate(T, filled_size);
             } else {
+                allocLog("thread {} allocating slow in size class {*} marking page full {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // put page in full mode for deffered reclamation
                 if (!page.markFull()) {
                     return page.allocate(T, filled_size);
@@ -265,33 +303,41 @@ const SizeClass = struct {
                     }
                 }
             }
-            page = @ptrCast(page.next_page);
+            maybe_page = page.next_page;
         }
 
+        allocLog("thread {} allocating slow in size class {*} requesting new page\n", .{ std.Thread.getCurrentId(), this });
         // No free exists anymore, requesting more allocation space for this thread.
         if (this.global_allocator.requestFreePage()) |new_page| {
+            allocLog("thread {} allocating slow in size class {*} claimed new page {*}\n", .{ std.Thread.getCurrentId(), this, new_page });
             new_page.claimForCurrentThread(this);
             // prepend new page to local pool
             new_page.next_page = this.pages;
             new_page.prev_page = @ptrFromInt(0);
-            if (@intFromPtr(page) != 0) {
+            if (@intFromPtr(maybe_page) != 0) {
+                var page: *Page = @ptrCast(this.pages);
                 page.prev_page = new_page;
             }
             this.pages = new_page;
             return new_page.allocate(T, filled_size);
         }
+        allocLog("thread {} allocating slow in size class {*} OOM\n", .{ std.Thread.getCurrentId(), this });
 
         // no free allocations exist and no free pages can be claimed
         return null;
     }
 
     fn deferedFrees(this: *This) void {
+        allocLog("thread {} allocating slow in size class {*} reclaiming defered frees\n", .{ std.Thread.getCurrentId(), this });
         var delayed = this.thread_delayed.swap(@ptrFromInt(0), std.atomic.Ordering.Acquire);
         while (@intFromPtr(delayed) != 0) {
+            const next = delayed.next;
             const maybe_page = this.global_allocator.pageOfPtr(@intFromPtr(delayed));
             if (maybe_page) |page| {
+
                 // append page to local page stack
                 page.next_page = this.pages;
+                page.prev_page = @ptrFromInt(0);
                 if (@intFromPtr(this.pages) != 0) {
                     this.pages.prev_page = page;
                 }
@@ -299,7 +345,10 @@ const SizeClass = struct {
                 // reclaim delayed marker
                 delayed.next = page.free_list;
                 page.free_list = delayed;
+                page.used -= 1;
+                allocLog("thread {} allocating slow in size class {*} reclaiming defered frees in {*} = {*}\n", .{ std.Thread.getCurrentId(), this, page, delayed });
             }
+            delayed = next;
         }
     }
 };
@@ -333,7 +382,7 @@ const LocalAllocator = struct {
 
     pub fn init(global_alloc: *GlobalAllocator) This {
         const a = [_]SizeClass{SizeClass.init(global_alloc)} ** sizeClasses;
-        return This{ .classPages = a, .global_allocator = global_alloc };
+        return This{ .class_pages = a, .global_allocator = global_alloc };
     }
 
     pub fn free(this: *This, comptime T: type, ptr: *T) void {
@@ -420,26 +469,64 @@ const GlobalAllocator = struct {
 };
 
 test "alloc.Page" {
-    std.debug.print("Lul\n", .{});
+    const OtherThreadFree = struct {
+        pub fn f(ga: *GlobalAllocator, ptr: *[17]u8) void {
+            var la = LocalAllocator.init(ga);
+            la.free([17]u8, ptr);
+        }
+    };
+
+    const expect = std.testing.expect;
+
+    std.debug.print("\n", .{});
     var alloc = try GlobalAllocator.init(10, std.heap.page_allocator);
-    var page = &alloc.pages[0];
-    var sizeClass = SizeClass.init(&alloc);
-    page.claimForCurrentThread(&sizeClass);
-    var s1 = page.allocate([17]u8, roundToClassSize(@sizeOf([17]u8))).?;
-    var s2 = page.allocate([17]u8, roundToClassSize(@sizeOf([17]u8))).?;
-    var s3 = page.allocate([17]u8, roundToClassSize(@sizeOf([17]u8))).?;
+    var localloc = LocalAllocator.init(&alloc);
+
+    std.debug.print(" Local alloc\n", .{});
+    var s1 = localloc.allocate([17]u8).?;
+    var s2 = localloc.allocate([17]u8).?;
+    var s3 = localloc.allocate([17]u8).?;
     const s = "1234567890abcdefg";
     s1.* = s.*;
     s2.* = s.*;
     s3.* = s.*;
-    const expect = std.testing.expect;
     try expect(std.hash_map.eqlString(s1, s));
     try expect(std.hash_map.eqlString(s2, s));
     try expect(std.hash_map.eqlString(s3, s));
-    _ = page.free([17]u8, s1);
-    _ = page.free([17]u8, s2);
-    _ = page.free([17]u8, s3);
-    _ = page.allocate([17]u8, roundToClassSize(@sizeOf([17]u8))).?;
+
+    std.debug.print(" 2x local free\n", .{});
+    _ = localloc.free([17]u8, s1);
+    _ = localloc.free([17]u8, s2);
+
+    std.debug.print(" thread free\n", .{});
+    var thread = std.Thread.spawn(.{}, OtherThreadFree.f, .{ &alloc, s3 }) catch unreachable;
+    thread.join();
+
+    std.debug.print(" draining page 1\n", .{});
+    for (0..(pageSizeInBlocks / roundToClassSize(17))) |_| {
+        s1 = localloc.allocate([17]u8).?;
+    }
+
+    std.debug.print(" mark allocator full\n", .{});
+    _ = localloc.allocate([17]u8).?;
+
+    std.debug.print(" thread free\n", .{});
+    thread = std.Thread.spawn(.{}, OtherThreadFree.f, .{ &alloc, s1 }) catch unreachable;
+    thread.join();
+
+    std.debug.print(" draining page 2\n", .{});
+    for (0..(pageSizeInBlocks / roundToClassSize(17) - 1)) |_| {
+        s3 = localloc.allocate([17]u8).?;
+    }
+
+    std.debug.print(" defered reclaiming\n", .{});
+    _ = localloc.allocate([17]u8).?;
+
+    std.debug.print(" mark allocator page 2 full\n", .{});
+    _ = localloc.allocate([17]u8).?;
+
+    std.debug.print(" marking normal local\n", .{});
+    localloc.free([17]u8, s3);
 
     std.debug.print("Ok\n", .{});
 }
