@@ -130,11 +130,15 @@ pub fn OptLock(comptime T: type) type {
         }
 
         pub fn read(this: *This, comptime DepMachine: type, comptime Result: type, comptime Creator: type, creator: Creator) ReadStateMachine(DepMachine, Result, Creator) {
-            return ReadStateMachine(DepMachine, Result, Creator).init(LockReadState(T, DepMachine, Creator, Result).createState(creator, this));
+            return ReadStateMachine(DepMachine, Result, Creator)
+                .init(LockReadState(T, DepMachine, Creator, Result)
+                .createState(creator, this));
         }
 
         pub fn write(this: *This, comptime DepMachine: type, comptime Result: type, comptime Creator: type, creator: Creator) WriteStateMachine(DepMachine, Result, Creator) {
-            return WriteStateMachine(DepMachine, Result, Creator).init(LockWriteState(T, DepMachine, Creator, Result).createState(creator, this));
+            return WriteStateMachine(DepMachine, Result, Creator)
+                .init(LockWriteState(T, DepMachine, Creator, Result)
+                .createState(creator, this));
         }
     };
 }

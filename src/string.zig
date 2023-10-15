@@ -94,6 +94,10 @@ pub const String = struct {
             allocator.freeSlice(u8, thisLarge.data[0..thisLarge.capacity]);
         }
     }
+
+    pub fn hash(this: *This) u64 {
+        return std.hash_map.hashString(this.sliceView());
+    }
 };
 
 test "string.String" {

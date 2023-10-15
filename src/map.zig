@@ -99,15 +99,87 @@ const Value = struct {
     }
 };
 
-fn Entry(comptime K: type, comptime V: type) type {
-    return struct {
-        key: K,
-        value: V,
-        pub fn init(k: K, v: V) @This() {
-            return .{ .key = k, .value = v };
-        }
+const Entry = struct {
+    metadata: u64,
+    key: string.String,
+    value: Value,
+    pub fn init(k: string.String, v: Value) @This() {
+        return .{ .key = k, .value = v };
+    }
+};
+
+const smallMapEntries: usize = 131; // a nice prime number
+
+const SmallMap = struct {
+    entries: [smallMapEntries]Entry,
+    level: u8,
+
+    const This = @This();
+
+    const presentMask: u64 = 1 << 63;
+    const distanceMask: u64 = 0b111 < 60;
+    const hashMask: u64 = (~(presentMask | distanceMask));
+    const maxDist: u64 = 7;
+
+    fn isMetaPresent(metadata: u64) bool {
+        return metadata & presentMask == presentMask;
+    }
+
+    fn distanceOfMeta(metadata: u64) u64 {
+        return (metadata & distanceMask) >> 60;
+    }
+
+    fn hashOfMeta(metadata: u64) u64 {
+        return metadata & hashMask;
+    }
+
+    fn metaOfDistanceAndHash(hash: u64, distance: u64) u64 {
+        return (hash & hashMask) | (distance << 60) | presentMask;
+    }
+
+    pub fn clear(this: *This, level: u8) void {
+        this.metadata = [_]u8{0} ** smallMapEntries;
+        this.level = level;
+    }
+
+    const SplitEntry = struct {
+        k: string.String,
+        v: ?Value,
     };
-}
+
+    const Result = union(enum) {
+        Present: *Value,
+        Absent: *Value,
+        Split: SplitEntry,
+    };
+
+    pub fn getOrCreate(this: *This, hash: u64, key: string.String) ?Result {
+        const shifted_hash = hash >> this.level;
+        const starting_pos = shifted_hash % smallMapEntries;
+        var pos = starting_pos;
+        var distance: u64 = 0;
+        while (isMetaPresent(this.entries[pos].metadata) and distanceOfMeta(this.entries[pos].metadata) >= distance and distance <= maxDist) {
+            if (hashOfMeta(this.entries[pos].metadata) == shifted_hash and this.entries[pos].key.eql(key)) {
+                return Result{ .Present = &this.entries[pos].value };
+            }
+            pos += 1;
+            pos %= smallMapEntries;
+            distance += 1;
+        }
+
+        if (distance > maxDist) {
+            return Result{ .Split = .{ .k = key } };
+        }
+
+        if (!isMetaPresent(this.entries[pos].metadata)) {
+            this.entries[pos].metadata = metaOfDistanceAndHash(shifted_hash, distance);
+            this.entries[pos].key = key;
+            return Result{ .Absent = &this.entries[pos].value };
+        }
+
+        // TODO: Shift entries
+    }
+};
 
 test "List" {
     const expect = std.testing.expect;
