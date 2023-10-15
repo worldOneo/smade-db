@@ -89,14 +89,14 @@ const Page = struct {
             allocLog("thread {} allocating size {} for page {*} from free list\n", .{ std.Thread.getCurrentId(), size, this });
             const alloc = free_list;
             this.free_list = free_list.next;
-            return @ptrCast(alloc);
+            return @ptrCast(@alignCast(alloc));
         }
         if (this.bump_idx < pageSizeInBlocks and this.bump_idx + size <= pageSizeInBlocks) {
             allocLog("thread {} allocating size {} for page {*} from bump\n", .{ std.Thread.getCurrentId(), size, this });
             var alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
             this.bump_idx += size;
             if (this.bump_idx <= pageSizeInBlocks) {
-                return @ptrCast(alloc);
+                return @ptrCast(@alignCast(alloc));
             }
         }
 
