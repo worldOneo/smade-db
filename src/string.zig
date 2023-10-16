@@ -13,6 +13,41 @@ pub const String = struct {
     };
     const This = @This();
 
+    pub fn fromInt(integer: i64) This {
+        var inner = [3]usize{ 0, 0, 0 };
+        var sms = @as(*[24]u8, @ptrCast(&inner));
+        sms[23] = 1;
+        var num = integer;
+        var pos: usize = 0;
+        if (num < 0) {
+            sms[pos] = '-';
+            num = -num;
+            pos += 1;
+        }
+
+        var powers: i64 = 18;
+        var written = false;
+        while (powers > -1) : (powers -= 1) {
+            const power = std.math.pow(i64, 10, powers);
+            const digit = @divFloor(num, power);
+            if (written or digit > 0) {
+                written = true;
+                sms[pos] = '0' + @as(u8, @intCast(digit));
+                pos += 1;
+                num -= digit * power;
+            }
+        }
+
+        if (!written) {
+            sms[pos] = '0';
+            pos += 1;
+        }
+        sms[23] = @intCast((pos << 2) | 1);
+
+        const value = This{ .value = inner };
+        return value;
+    }
+
     pub fn empty() This {
         var inner = [3]usize{ 0, 0, 0 };
         var sms = @as(*[24]u8, @ptrCast(&inner));
@@ -125,4 +160,23 @@ test "string.String" {
     try expect(std.mem.eql(u8, s1.sliceView(), "Hello, World!"));
     s1.deinit(&la);
     s2.deinit(&la);
+}
+
+test "string.String.fromInt" {
+    const expect = std.testing.expect;
+    const s0 = String.fromInt(0);
+    const s1 = String.fromInt(1);
+    const s_1 = String.fromInt(-1);
+    const s1234 = String.fromInt(1234);
+    const s_1234 = String.fromInt(-1234);
+    const s2345678901 = String.fromInt(2345678901);
+    const s_2345678901 = String.fromInt(-2345678901);
+
+    try expect(std.mem.eql(u8, s0.sliceView(), "0"));
+    try expect(std.mem.eql(u8, s1.sliceView(), "1"));
+    try expect(std.mem.eql(u8, s_1.sliceView(), "-1"));
+    try expect(std.mem.eql(u8, s1234.sliceView(), "1234"));
+    try expect(std.mem.eql(u8, s_1234.sliceView(), "-1234"));
+    try expect(std.mem.eql(u8, s2345678901.sliceView(), "2345678901"));
+    try expect(std.mem.eql(u8, s_2345678901.sliceView(), "-2345678901"));
 }
