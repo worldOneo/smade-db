@@ -8,8 +8,8 @@ pub fn LockReadState(comptime T: type, comptime DepMachine: type, comptime Creat
                 lock: *OptLock(T),
                 creator: Creator,
             },
-            DriveState: struct { machine: DepMachine, lock: *OptLock(T), creator: Creator, version: u64 },
-            Verify: struct { version: u64, lock: *OptLock(T), creator: Creator, result: Result },
+            DriveState: struct { machine: DepMachine, lock: *OptLock(T), creator: Creator, read: OptLock(T).Read },
+            Verify: struct { read: OptLock(T).Read, lock: *OptLock(T), creator: Creator, result: Result },
         };
         const This = @This();
         const Drive = state.Drive(This.State, Result);
@@ -17,13 +17,12 @@ pub fn LockReadState(comptime T: type, comptime DepMachine: type, comptime Creat
         pub fn drive(self: This.State) Drive {
             switch (self) {
                 This.State.Read => |v| {
-                    const ver = v.lock.version.load(std.atomic.Ordering.Acquire);
-                    if (ver & 1 == 1) {
-                        return Drive{ .Incomplete = self };
+                    if (v.lock.startRead()) |read| {
+                        var creator = v.creator;
+                        const new = creator.new();
+                        return drive(This.State{ .DriveState = .{ .creator = creator, .lock = v.lock, .read = read, .machine = new } });
                     }
-                    var creator = v.creator;
-                    const new = creator.new();
-                    return drive(This.State{ .DriveState = .{ .creator = creator, .lock = v.lock, .version = ver, .machine = new } });
+                    return Drive{ .Incomplete = self };
                 },
                 This.State.DriveState => |v| {
                     var machine = v.machine;
@@ -32,14 +31,13 @@ pub fn LockReadState(comptime T: type, comptime DepMachine: type, comptime Creat
                     switch (res) {
                         @TypeOf(res).Incomplete => |ms| {
                             machine.state = ms;
-                            return Drive{ .Incomplete = This.State{ .DriveState = .{ .creator = v.creator, .lock = v.lock, .version = v.version, .machine = machine } } };
+                            return Drive{ .Incomplete = This.State{ .DriveState = .{ .creator = v.creator, .lock = v.lock, .read = v.read, .machine = machine } } };
                         },
-                        @TypeOf(res).Complete => |ms| return drive(This.State{ .Verify = .{ .creator = v.creator, .lock = v.lock, .version = v.version, .result = ms } }),
+                        @TypeOf(res).Complete => |ms| return drive(This.State{ .Verify = .{ .creator = v.creator, .lock = v.lock, .read = v.read, .result = ms } }),
                     }
                 },
                 This.State.Verify => |v| {
-                    const ver = v.lock.version.load(std.atomic.Ordering.Unordered);
-                    if (ver != v.version) {
+                    if (!v.lock.verifyRead(v.read)) {
                         return Drive{ .Incomplete = This.State{ .Read = .{ .creator = v.creator, .lock = v.lock } } };
                     } else {
                         return Drive{ .Complete = v.result };
@@ -70,13 +68,7 @@ pub fn LockWriteState(comptime T: type, comptime DepMachine: type, comptime Crea
         pub fn drive(self: This.State) Drive {
             switch (self) {
                 This.State.Acquire => |v| {
-                    const ver = v.lock.version.load(std.atomic.Ordering.Acquire);
-
-                    if (ver & 1 == 1) {
-                        return Drive{ .Incomplete = self };
-                    }
-
-                    if (v.lock.version.tryCompareAndSwap(ver, ver + 1, std.atomic.Ordering.Monotonic, std.atomic.Ordering.Monotonic)) |_| {
+                    if (v.lock.tryLock()) |_| {
                         return Drive{ .Incomplete = self };
                     }
 
@@ -96,7 +88,7 @@ pub fn LockWriteState(comptime T: type, comptime DepMachine: type, comptime Crea
                     }
                 },
                 This.State.Release => |v| {
-                    _ = v.lock.version.fetchAdd(1, std.atomic.Ordering.Release);
+                    v.lock.unlock();
                     return Drive{ .Complete = v.result };
                 },
             }
@@ -139,6 +131,38 @@ pub fn OptLock(comptime T: type) type {
             return WriteStateMachine(DepMachine, Result, Creator)
                 .init(LockWriteState(T, DepMachine, Creator, Result)
                 .createState(creator, this));
+        }
+
+        pub fn tryLock(this: *This) ?*T {
+            const ver = this.version.load(std.atomic.Ordering.Acquire);
+
+            if (ver & 1 == 1) {
+                return null;
+            }
+            if (this.version.tryCompareAndSwap(ver, ver + 1, std.atomic.Ordering.Monotonic, std.atomic.Ordering.Monotonic) != null) {
+                return null;
+            }
+            return &this.value;
+        }
+
+        pub fn unlock(this: *This) void {
+            _ = this.version.fetchAdd(1, std.atomic.Ordering.Release);
+        }
+
+        pub const Read = struct { version: u64, data: *const T };
+
+        pub fn startRead(this: *This) ?Read {
+            const ver = this.version.load(std.atomic.Ordering.Acquire);
+
+            if (ver & 1 == 1) {
+                return null;
+            }
+            return Read{ .version = ver, .data = &this.value };
+        }
+
+        pub fn verifyRead(this: *This, old_read: Read) bool {
+            const ver = this.version.load(std.atomic.Ordering.Acquire);
+            return ver == old_read.version;
         }
     };
 }

@@ -1,6 +1,8 @@
 const std = @import("std");
 const string = @import("./string.zig");
 const alloc = @import("./alloc.zig");
+const lock = @import("./lock.zig");
+const state = @import("./state.zig");
 
 const ValueTag = enum(usize) {
     LargeString = 0b00,
@@ -73,7 +75,7 @@ const List = struct {
     }
 };
 
-const Value = struct {
+pub const Value = struct {
     value: [3]usize,
 
     const This = @This();
@@ -104,7 +106,7 @@ const Value = struct {
     }
 };
 
-const Entry = struct {
+pub const Entry = struct {
     metadata: u64,
     key: string.String,
     value: Value,
@@ -115,7 +117,7 @@ const Entry = struct {
 
 const smallMapEntries: usize = 131; // a nice prime number
 
-const SmallMap = struct {
+pub const SmallMap = struct {
     entries: [smallMapEntries]Entry,
     level: u8,
 
@@ -276,6 +278,122 @@ const SmallMap = struct {
         }
 
         return null;
+    }
+};
+
+pub const ExtendibleMap = struct {
+    dict: lock.OptLock([]std.atomic.Atomic(*lock.OptLock(SmallMap))),
+
+    const This = @This();
+
+    const AcquireState = struct {
+        hash: u64,
+        this: *This,
+    };
+
+    pub const AcquireMachine = state.Machine(AcquireState, *SmallMap, struct {
+        const Drive = state.Drive(AcquireState, *SmallMap);
+        fn drive(s: AcquireState) Drive {
+            if (s.this.dict.startRead()) |reader| {
+                const idx = s.hash % reader.data.len;
+                var map_lock = reader.data[idx].load(std.atomic.Ordering.Monotonic);
+                if (map_lock.tryLock()) |map| {
+                    if (s.this.dict.verifyRead(reader) and map == reader.data[idx].load(std.atomic.Ordering.Monotonic)) {
+                        return Drive{ .Complete = map };
+                    }
+                }
+            }
+            return Drive{ .Incomplete = s };
+        }
+    }.drive);
+
+    pub fn acquire(this: *This, hash: u64) AcquireMachine {
+        return AcquireMachine.init(AcquireState{
+            .hash = hash,
+            .this = this,
+        });
+    }
+
+    pub fn release(this: *This, hash: u64) void {
+        var dict = this.dict.value; // this is fine because we have locked the hash
+        var map = dict[hash % dict.len].load(std.atomic.Ordering.Monotonic);
+        map.unlock();
+    }
+
+    pub fn ReadState(comptime DepMachine: type, comptime Creator: type) type {
+        return union(enum) {
+            Preparing: struct {
+                hash: u64,
+                this: *This,
+                creator: Creator,
+            },
+            Driving: struct {
+                hash: u64,
+                this: *This,
+                creator: Creator,
+                lock: *lock.OptLock(SmallMap),
+                read: lock.OptLock(SmallMap).Read,
+                machine: DepMachine,
+            },
+        };
+    }
+
+    pub fn ReadMachine(comptime DepMachine: type, comptime Creator: type, comptime Result: type) type {
+        const State = ReadState(DepMachine, Creator);
+        return state.Machine(State, Result, struct {
+            const Drive = state.Drive(State, Result);
+            pub fn drive(s: State) Drive {
+                switch (s) {
+                    State.Preparing => |const_prep| {
+                        var prep = const_prep;
+                        if (prep.this.dict.startRead()) |read_dict| {
+                            var map_lock = read_dict.value[prep.hash % read_dict.value.len].load(std.atomic.Ordering.Monotonic);
+                            if (map_lock.startRead()) |lock_read| {
+                                return drive(State{
+                                    .Driving = .{
+                                        .hash = prep.hash,
+                                        .this = prep.this,
+                                        .creator = prep.creator,
+                                        .read = lock_read,
+                                        .machine = prep.creator.new(),
+                                        .lock = map_lock,
+                                    },
+                                });
+                            }
+                        }
+                        return Drive{ .Incomplete = s };
+                    },
+                    State.Driving => |const_driving| {
+                        var driving = const_driving;
+                        if (driving.machine.drive(driving.read.value)) |result| {
+                            if (driving.lock.verifyRead(driving.read)) {
+                                return Drive{ .Complete = result };
+                            } else {
+                                // TODO: Benchmark greedy retries
+                                return Drive{ .Incomplete = State{
+                                    .Preparing = .{
+                                        .hash = driving.hash,
+                                        .this = driving.this,
+                                        .creator = driving.creator,
+                                    },
+                                } };
+                            }
+                            return Drive{ .Incomplete = driving };
+                        }
+                    },
+                }
+            }
+        }.drive);
+    }
+
+    pub fn read(this: *This, hash: u64, comptime DepMachine: type, comptime Creator: type, creator: Creator) ReadMachine(DepMachine, Creator) {
+        return ReadMachine(DepMachine, Creator).init(ReadState(DepMachine, Creator){
+            .Preparing = .{
+                .hash = hash,
+                .this = this,
+                .creator = creator,
+            },
+        });
     }
 };
 
