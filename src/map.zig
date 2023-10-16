@@ -79,7 +79,7 @@ const Value = struct {
     const This = @This();
     fn tag(this: *This) ValueTag {
         var sms: *const [24]u8 = @ptrCast(this);
-        return @enumFromInt(sms.data[23] & 0b11);
+        return @enumFromInt(sms[23] & 0b11);
     }
 
     pub fn asString(this: *This) ?*string.String {
@@ -90,8 +90,9 @@ const Value = struct {
         return null;
     }
 
-    pub fn fromString(str: string.String) Value {
-        return .{ .value = @as([3]usize, @ptrCast(&str)).* };
+    pub fn fromString(const_str: string.String) Value {
+        var str = const_str;
+        return .{ .value = @as(*[3]usize, @ptrCast(&str)).* };
     }
 
     pub fn asList(this: *This) ?*List {
@@ -121,7 +122,7 @@ const SmallMap = struct {
     const This = @This();
 
     const presentMask: u64 = 1 << 63;
-    const distanceMask: u64 = 0b111 < 60;
+    const distanceMask: u64 = 0b111 << 60;
     const hashMask: u64 = (~(presentMask | distanceMask));
     const maxDist: u64 = 7;
 
@@ -164,14 +165,15 @@ const SmallMap = struct {
         Split: SplitEntry,
     };
 
+    // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
     pub fn updateOrCreate(this: *This, hash: u64, key: string.String) Result {
-        const shifted_hash = hash >> this.level;
+        const shifted_hash = hash >> @intCast(this.level);
         const starting_pos = shifted_hash % smallMapEntries;
         var pos = starting_pos;
         var distance: u64 = 0;
 
         while (isMetaPresent(this.entries[pos].metadata) and distanceOfMeta(this.entries[pos].metadata) >= distance and distance <= maxDist) {
-            if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)) {
+            if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(&key)) {
                 return Result{ .Present = &this.entries[pos].value };
             }
             pos += 1;
@@ -219,14 +221,14 @@ const SmallMap = struct {
         return Result{ .Absent = v_ptr };
     }
 
-    pub fn get(this: *This, hash: u64, key: string.String) ?*Value {
-        const shifted_hash = hash >> this.level;
+    pub fn get(this: *This, hash: u64, key: *const string.String) ?*Value {
+        const shifted_hash = hash >> @intCast(this.level);
         const starting_pos = shifted_hash % smallMapEntries;
         var pos = starting_pos;
         var distance: u64 = 0;
         while (distance <= maxDist and
             isMetaPresent(this.entries[pos].metadata) and
-            distanceOfMeta(this.entries[pos].metadata) and
+            distanceOfMeta(this.entries[pos].metadata) >= distance and
             !(hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)))
         {
             distance += 1;
@@ -240,14 +242,14 @@ const SmallMap = struct {
         return null;
     }
 
-    pub fn delete(this: *This, hash: u64, key: string.String) ?Entry {
-        const shifted_hash = hash >> this.level;
+    pub fn delete(this: *This, hash: u64, key: *const string.String) ?Entry {
+        const shifted_hash = hash >> @intCast(this.level);
         const starting_pos = shifted_hash % smallMapEntries;
         var pos = starting_pos;
         var distance: u64 = 0;
         while (distance <= maxDist and
             isMetaPresent(this.entries[pos].metadata) and
-            distanceOfMeta(this.entries[pos].metadata) and
+            distanceOfMeta(this.entries[pos].metadata) >= distance and
             !(hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)))
         {
             distance += 1;
@@ -264,12 +266,12 @@ const SmallMap = struct {
                 pos %= smallMapEntries;
                 const pos_meta = this.entries[pos].metadata;
                 const pos_dist = distanceOfMeta(pos_meta);
-                if (!isMetaPresent(pos_meta) || pos_dist == 0) {
+                if (!isMetaPresent(pos_meta) or pos_dist == 0) {
                     this.entries[prev_pos].metadata = 0;
                     return deleted;
                 }
                 this.entries[prev_pos] = this.entries[pos];
-                this.entries[prev_pos].metadata = metaOfDistanceAndHash(hashOfMeta(pos_meta), pos_dist);
+                this.entries[prev_pos].metadata = metaOfDistanceAndHash(hashOfMeta(pos_meta), pos_dist - 1);
             }
         }
 
@@ -277,7 +279,90 @@ const SmallMap = struct {
     }
 };
 
-test "List" {
+test "map.SmallMap.basic" {
+    const expect = std.testing.expect;
+
+    var a: SmallMap = undefined;
+    a.clear(0);
+
+    for (0..100) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        const v = k;
+        switch (a.updateOrCreate(k.hash(), k)) {
+            SmallMap.Result.Absent => |ptr| ptr.* = Value.fromString(v),
+            else => unreachable,
+        }
+    }
+
+    for (0..100) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        const v = string.String.fromInt(i + 1);
+        switch (a.updateOrCreate(k.hash(), k)) {
+            SmallMap.Result.Present => |ptr| {
+                const as_str = ptr.asString() orelse unreachable;
+                try expect(as_str.eql(&k));
+                ptr.* = Value.fromString(v);
+            },
+            else => unreachable,
+        }
+    }
+
+    for (0..100) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        const v = string.String.fromInt(i + 1);
+        var v_ptr = a.get(k.hash(), &k) orelse unreachable;
+        const as_str = v_ptr.asString() orelse unreachable;
+        try expect(as_str.eql(&v));
+    }
+
+    for (0..50) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        const v = string.String.fromInt(i + 1);
+        var entry = a.delete(k.hash(), &k) orelse unreachable;
+        const as_str = entry.value.asString() orelse unreachable;
+        try expect(as_str.eql(&v));
+    }
+
+    for (0..50) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        if (a.get(k.hash(), &k)) |_| {
+            unreachable;
+        }
+    }
+
+    for (50..100) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        const v = string.String.fromInt(i + 1);
+        var v_ptr = a.get(k.hash(), &k) orelse unreachable;
+        const as_str = v_ptr.asString() orelse unreachable;
+        try expect(as_str.eql(&v));
+    }
+
+    for (50..100) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        const v = string.String.fromInt(i + 1);
+        var entry = a.delete(k.hash(), &k) orelse unreachable;
+        const as_str = entry.value.asString() orelse unreachable;
+        try expect(as_str.eql(&v));
+    }
+
+    for (50..100) |ui| {
+        const i: i64 = @intCast(ui);
+        const k = string.String.fromInt(i);
+        if (a.get(k.hash(), &k)) |_| {
+            unreachable;
+        }
+    }
+}
+
+test "map.List" {
     const expect = std.testing.expect;
     try expect(@sizeOf(*allowzero void) == @sizeOf(?*void) and @sizeOf(List) == @sizeOf(Value));
 

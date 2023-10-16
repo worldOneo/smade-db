@@ -129,11 +129,11 @@ pub const String = struct {
         }
     }
 
-    pub fn hash(this: *This) u64 {
+    pub fn hash(this: *const This) u64 {
         return std.hash_map.hashString(this.sliceView());
     }
 
-    pub fn clone(this: *This, allocator: *alloc.LocalAllocator) This {
+    pub fn clone(this: *const This, allocator: *alloc.LocalAllocator) This {
         var new = empty();
         new.append(this.sliceView(), allocator);
         return new;
