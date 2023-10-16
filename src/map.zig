@@ -90,6 +90,10 @@ const Value = struct {
         return null;
     }
 
+    pub fn fromString(str: string.String) Value {
+        return .{ .value = @as([3]usize, @ptrCast(&str)).* };
+    }
+
     pub fn asList(this: *This) ?*List {
         const valueTag = this.tag();
         if (valueTag != .List) {
@@ -137,14 +141,21 @@ const SmallMap = struct {
         return (hash & hashMask) | (distance << 60) | presentMask;
     }
 
+    fn cutHash(hash: u64) u64 {
+        return (hash & hashMask);
+    }
+
     pub fn clear(this: *This, level: u8) void {
-        this.metadata = [_]u8{0} ** smallMapEntries;
+        for (0..smallMapEntries) |entry_i| {
+            this.entries[entry_i].metadata = 0;
+        }
         this.level = level;
     }
 
     const SplitEntry = struct {
         k: string.String,
         v: ?Value,
+        v_ptr: ?*Value,
     };
 
     const Result = union(enum) {
@@ -153,13 +164,14 @@ const SmallMap = struct {
         Split: SplitEntry,
     };
 
-    pub fn getOrCreate(this: *This, hash: u64, key: string.String) ?Result {
+    pub fn updateOrCreate(this: *This, hash: u64, key: string.String) Result {
         const shifted_hash = hash >> this.level;
         const starting_pos = shifted_hash % smallMapEntries;
         var pos = starting_pos;
         var distance: u64 = 0;
+
         while (isMetaPresent(this.entries[pos].metadata) and distanceOfMeta(this.entries[pos].metadata) >= distance and distance <= maxDist) {
-            if (hashOfMeta(this.entries[pos].metadata) == shifted_hash and this.entries[pos].key.eql(key)) {
+            if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)) {
                 return Result{ .Present = &this.entries[pos].value };
             }
             pos += 1;
@@ -168,7 +180,7 @@ const SmallMap = struct {
         }
 
         if (distance > maxDist) {
-            return Result{ .Split = .{ .k = key } };
+            return Result{ .Split = .{ .k = key, .v = null, .v_ptr = null } };
         }
 
         if (!isMetaPresent(this.entries[pos].metadata)) {
@@ -177,7 +189,91 @@ const SmallMap = struct {
             return Result{ .Absent = &this.entries[pos].value };
         }
 
-        // TODO: Shift entries
+        var prev_entry = this.entries[pos];
+        var shift_pos = pos;
+        this.entries[pos] = Entry{
+            .metadata = metaOfDistanceAndHash(shifted_hash, distance),
+            .key = key,
+            .value = Value.fromString(string.String.empty()),
+        };
+
+        const v_ptr = &this.entries[pos].value;
+
+        while (isMetaPresent(prev_entry.metadata)) {
+            shift_pos += 1;
+            shift_pos %= 131;
+
+            const prev_distance = distanceOfMeta(prev_entry.metadata);
+            const new_distance = prev_distance + 1;
+
+            if (new_distance > maxDist) {
+                return Result{ .Split = .{ .k = prev_entry.key, .v = prev_entry.value, .v_ptr = v_ptr } };
+            }
+
+            const tmp = this.entries[shift_pos];
+            prev_entry.metadata = metaOfDistanceAndHash(hashOfMeta(prev_entry.metadata), new_distance);
+            this.entries[shift_pos] = prev_entry;
+            prev_entry = tmp;
+        }
+
+        return Result{ .Absent = v_ptr };
+    }
+
+    pub fn get(this: *This, hash: u64, key: string.String) ?*Value {
+        const shifted_hash = hash >> this.level;
+        const starting_pos = shifted_hash % smallMapEntries;
+        var pos = starting_pos;
+        var distance: u64 = 0;
+        while (distance <= maxDist and
+            isMetaPresent(this.entries[pos].metadata) and
+            distanceOfMeta(this.entries[pos].metadata) and
+            !(hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)))
+        {
+            distance += 1;
+            pos += 1;
+            pos %= smallMapEntries;
+        }
+
+        if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)) {
+            return &this.entries[pos].value;
+        }
+        return null;
+    }
+
+    pub fn delete(this: *This, hash: u64, key: string.String) ?Entry {
+        const shifted_hash = hash >> this.level;
+        const starting_pos = shifted_hash % smallMapEntries;
+        var pos = starting_pos;
+        var distance: u64 = 0;
+        while (distance <= maxDist and
+            isMetaPresent(this.entries[pos].metadata) and
+            distanceOfMeta(this.entries[pos].metadata) and
+            !(hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)))
+        {
+            distance += 1;
+            pos += 1;
+            pos %= smallMapEntries;
+        }
+
+        if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)) {
+            const deleted = this.entries[pos];
+
+            while (true) {
+                var prev_pos = pos;
+                pos += 1;
+                pos %= smallMapEntries;
+                const pos_meta = this.entries[pos].metadata;
+                const pos_dist = distanceOfMeta(pos_meta);
+                if (!isMetaPresent(pos_meta) || pos_dist == 0) {
+                    this.entries[prev_pos].metadata = 0;
+                    return deleted;
+                }
+                this.entries[prev_pos] = this.entries[pos];
+                this.entries[prev_pos].metadata = metaOfDistanceAndHash(hashOfMeta(pos_meta), pos_dist);
+            }
+        }
+
+        return null;
     }
 };
 

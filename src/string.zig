@@ -18,7 +18,6 @@ pub const String = struct {
         var sms = @as(*[24]u8, @ptrCast(&inner));
         sms[23] = 1;
         const value = This{ .value = inner };
-        _ = value.isSmall();
         return value;
     }
 
@@ -88,7 +87,7 @@ pub const String = struct {
         return std.mem.eql(u8, this.sliceView(), other.sliceView());
     }
 
-    pub fn dealloc(this: *This, allocator: *alloc.LocalAllocator) void {
+    pub fn deinit(this: *This, allocator: *alloc.LocalAllocator) void {
         if (!this.isSmall()) {
             var thisLarge: *LargeString = @ptrCast(this);
             allocator.freeSlice(u8, thisLarge.data[0..thisLarge.capacity]);
@@ -97,6 +96,12 @@ pub const String = struct {
 
     pub fn hash(this: *This) u64 {
         return std.hash_map.hashString(this.sliceView());
+    }
+
+    pub fn clone(this: *This, allocator: *alloc.LocalAllocator) This {
+        var new = empty();
+        new.append(this.sliceView(), allocator);
+        return new;
     }
 };
 
@@ -118,6 +123,6 @@ test "string.String" {
     try expect(!s2.isSmall());
     try expect(std.mem.eql(u8, s2.sliceView(), "Hello, World!01234567890abcdefghjiklmnop"));
     try expect(std.mem.eql(u8, s1.sliceView(), "Hello, World!"));
-    s1.dealloc(&la);
-    s2.dealloc(&la);
+    s1.deinit(&la);
+    s2.deinit(&la);
 }
