@@ -11,6 +11,10 @@ const ValueTag = enum(usize) {
     Complex = 0b11,
 };
 
+const ComplexValueTag = enum(usize) {
+    Nil = 0b1,
+};
+
 const List = struct {
     length: usize,
     tail: ?*Node,
@@ -79,9 +83,33 @@ pub const Value = struct {
     value: [3]usize,
 
     const This = @This();
+
+    pub fn nil() This {
+        var inner = [3]usize{ 0, 0, 0 };
+        var sms = @as(*[24]u8, @ptrCast(&inner));
+        sms[23] = 0b111;
+        const value = This{ .value = inner };
+        return value;
+    }
+
     fn tag(this: *This) ValueTag {
         var sms: *const [24]u8 = @ptrCast(this);
         return @enumFromInt(sms[23] & 0b11);
+    }
+
+    fn complexTag(this: *This) ?ComplexValueTag {
+        if (this.tag() == ValueTag.Complex) {
+            var sms: *const [24]u8 = @ptrCast(this);
+            return @enumFromInt((sms[23] >> 2) & 0b11);
+        }
+        return null;
+    }
+
+    pub fn isPresent(this: *This) bool {
+        if (this.complexTag()) |complex_tag| {
+            return complex_tag != ComplexValueTag.Nil;
+        }
+        return true;
     }
 
     pub fn asString(this: *This) ?*string.String {
@@ -115,11 +143,12 @@ pub const Entry = struct {
     }
 };
 
-const smallMapEntries: usize = 131; // a nice prime number
+const smallMapEntries: usize = 1021; // a nice prime number, consider 509, 251, or 127
 
 pub const SmallMap = struct {
-    entries: [smallMapEntries]Entry,
     level: u8,
+    size: u16,
+    entries: [smallMapEntries]Entry,
 
     const This = @This();
 
@@ -153,23 +182,24 @@ pub const SmallMap = struct {
             this.entries[entry_i].metadata = 0;
         }
         this.level = level;
+        this.size = 0;
     }
-
-    const SplitEntry = struct {
-        k: string.String,
-        v: ?Value,
-        v_ptr: ?*Value,
-    };
 
     const Result = union(enum) {
         Present: *Value,
         Absent: *Value,
-        Split: SplitEntry,
+        Split,
     };
 
     // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
+    // if Result.Split the key is owned by caller and nothing has been changed
     pub fn updateOrCreate(this: *This, hash: u64, key: string.String) Result {
+        if (this.size == @as(u16, @intCast(smallMapEntries))) {
+            return .Split;
+        }
+
         const shifted_hash = hash >> @intCast(this.level);
+
         const starting_pos = shifted_hash % smallMapEntries;
         var pos = starting_pos;
         var distance: u64 = 0;
@@ -184,35 +214,55 @@ pub const SmallMap = struct {
         }
 
         if (distance > maxDist) {
-            return Result{ .Split = .{ .k = key, .v = null, .v_ptr = null } };
+            return .Split;
         }
 
         if (!isMetaPresent(this.entries[pos].metadata)) {
             this.entries[pos].metadata = metaOfDistanceAndHash(shifted_hash, distance);
             this.entries[pos].key = key;
+            this.size += 1;
             return Result{ .Absent = &this.entries[pos].value };
         }
 
+        // shift all later entries.
+        // We need to do it 2 times to prevent corruption and OOM.
+
+        // first pass, test if insert is possible:
         var prev_entry = this.entries[pos];
         var shift_pos = pos;
+        while (isMetaPresent(prev_entry.metadata)) {
+            shift_pos += 1;
+            shift_pos %= smallMapEntries;
+
+            const prev_distance = distanceOfMeta(prev_entry.metadata);
+            const new_distance = prev_distance + 1;
+
+            if (new_distance > maxDist) {
+                // we know that this insert couldn't be completed
+                return .Split;
+            }
+
+            prev_entry = this.entries[shift_pos];
+        }
+
+        // second pass with the knowledge, that this insert can be completed;
+        prev_entry = this.entries[pos];
+        shift_pos = pos;
+
         this.entries[pos] = Entry{
             .metadata = metaOfDistanceAndHash(shifted_hash, distance),
             .key = key,
-            .value = Value.fromString(string.String.empty()),
+            .value = Value.nil(),
         };
 
         const v_ptr = &this.entries[pos].value;
 
         while (isMetaPresent(prev_entry.metadata)) {
             shift_pos += 1;
-            shift_pos %= 131;
+            shift_pos %= smallMapEntries;
 
             const prev_distance = distanceOfMeta(prev_entry.metadata);
             const new_distance = prev_distance + 1;
-
-            if (new_distance > maxDist) {
-                return Result{ .Split = .{ .k = prev_entry.key, .v = prev_entry.value, .v_ptr = v_ptr } };
-            }
 
             const tmp = this.entries[shift_pos];
             prev_entry.metadata = metaOfDistanceAndHash(hashOfMeta(prev_entry.metadata), new_distance);
@@ -220,6 +270,7 @@ pub const SmallMap = struct {
             prev_entry = tmp;
         }
 
+        this.size += 1;
         return Result{ .Absent = v_ptr };
     }
 
@@ -270,6 +321,7 @@ pub const SmallMap = struct {
                 const pos_dist = distanceOfMeta(pos_meta);
                 if (!isMetaPresent(pos_meta) or pos_dist == 0) {
                     this.entries[prev_pos].metadata = 0;
+                    this.size -= 1;
                     return deleted;
                 }
                 this.entries[prev_pos] = this.entries[pos];
@@ -279,10 +331,35 @@ pub const SmallMap = struct {
 
         return null;
     }
+
+    fn fillFromSplit(this: *This, data: *This, bit: u64) void {
+        for (0..smallMapEntries) |i| {
+            if (isMetaPresent(data.entries[i]) and
+                hashOfMeta(data.entries[i]) & 1 == bit)
+            {
+                switch (this.updateOrCreate(data.entries[i].key.hash(), data.entries[i].key)) {
+                    Result.Absent => |v| v.* = data.entries[i].value,
+                    else => unreachable,
+                }
+            }
+        }
+    }
 };
 
+const maxDictExpansions: usize = 48;
+const startLevel: usize = 4;
+
 pub const ExtendibleMap = struct {
-    dict: lock.OptLock([]std.atomic.Atomic(*lock.OptLock(SmallMap))),
+    dict: std.atomic.Atomic(*Dict),
+    max_expansions: usize,
+    expansion_ptrs: [maxDictExpansions]lock.OptLock(*Dict),
+    expansions: [maxDictExpansions]Dict,
+
+    const Dict = struct {
+        segments: []std.atomic.Atomic(*lock.OptLock(SmallMap)),
+        level: u64,
+        copied: bool,
+    };
 
     const This = @This();
 
@@ -291,17 +368,34 @@ pub const ExtendibleMap = struct {
         this: *This,
     };
 
+    fn currentIdx(dict: *Dict, hash: u64) u64 {
+        var level = dict.level;
+        if (dict.copied == false) {
+            level -= 1;
+        }
+        const idx = hash & ((1 << level) - 1);
+        return idx;
+    }
+
     pub const AcquireMachine = state.Machine(AcquireState, *SmallMap, struct {
         const Drive = state.Drive(AcquireState, *SmallMap);
         fn drive(s: AcquireState) Drive {
-            if (s.this.dict.startRead()) |reader| {
-                const idx = s.hash % reader.data.len;
-                var map_lock = reader.data[idx].load(std.atomic.Ordering.Monotonic);
-                if (map_lock.tryLock()) |map| {
-                    if (s.this.dict.verifyRead(reader) and map == reader.data[idx].load(std.atomic.Ordering.Monotonic)) {
-                        return Drive{ .Complete = map };
-                    }
+            const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+            const idx = currentIdx(dict, s.hash);
+            var map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            if (map_lock.tryLock()) |map| {
+                // Dash Algorithm 3 line 15
+                // see ReadMachine
+
+                const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                const new_idx = currentIdx(dict, s.hash);
+                const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+
+                if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
+                    map_lock.unlock();
+                    return Drive{ .Incomplete = s };
                 }
+                return Drive{ .Complete = map };
             }
             return Drive{ .Incomplete = s };
         }
@@ -346,20 +440,44 @@ pub const ExtendibleMap = struct {
                 switch (s) {
                     State.Preparing => |const_prep| {
                         var prep = const_prep;
-                        if (prep.this.dict.startRead()) |read_dict| {
-                            var map_lock = read_dict.value[prep.hash % read_dict.value.len].load(std.atomic.Ordering.Monotonic);
-                            if (map_lock.startRead()) |lock_read| {
-                                return drive(State{
-                                    .Driving = .{
-                                        .hash = prep.hash,
-                                        .this = prep.this,
-                                        .creator = prep.creator,
-                                        .read = lock_read,
-                                        .machine = prep.creator.new(),
-                                        .lock = map_lock,
-                                    },
-                                });
+
+                        var read_dict = prep.this.dict.load(std.atomic.Ordering.Acquire);
+                        const idx = currentIdx(read_dict, prep.hash);
+
+                        var map_lock = read_dict.value.level[idx].load(std.atomic.Ordering.Monotonic);
+                        if (map_lock.startRead()) |lock_read| {
+
+                            // Things couldve happend between calculating the index and acquiring read permission for the small map.
+
+                            // For example it was assumed, that this read could safely be from an unlocked map, whilest splitting to a bigger dict.
+                            //   This may not be the case, because between currentIdx and startRead the map could've been unlocked and finished it's split.
+                            //   If this split was into the upper half of the dict we now have the wrong read permission.
+
+                            // The other case is if it simply split.
+                            // We loaded the pointer to old_low, it split into high, low, we read from low, while our key was moved to high.
+                            // Therefore we need to double check.
+
+                            // See: Dash Alogorithm 3 line 15
+
+                            var new_read_dict = prep.this.dict.load(std.atomic.Ordering.Acquire);
+                            const new_idx = currentIdx(new_read_dict, prep.hash);
+                            if (new_idx != idx or
+                                new_read_dict != read_dict or
+                                map_lock != read_dict.value.level[idx].load(std.atomic.Ordering.Monotonic))
+                            {
+                                return State{ .Incomplete = s };
                             }
+
+                            return drive(State{
+                                .Driving = .{
+                                    .hash = prep.hash,
+                                    .this = prep.this,
+                                    .creator = prep.creator,
+                                    .read = lock_read,
+                                    .machine = prep.creator.new(),
+                                    .lock = map_lock,
+                                },
+                            });
                         }
                         return Drive{ .Incomplete = s };
                     },
@@ -378,8 +496,8 @@ pub const ExtendibleMap = struct {
                                     },
                                 } };
                             }
-                            return Drive{ .Incomplete = driving };
                         }
+                        return Drive{ .Incomplete = driving };
                     },
                 }
             }
@@ -393,6 +511,105 @@ pub const ExtendibleMap = struct {
                 .this = this,
                 .creator = creator,
             },
+        });
+    }
+
+    const SplitState = struct {
+        this: *This,
+        with: *SmallMap,
+        hash: u64,
+    };
+
+    pub const SplitMachine = state.Machine(SplitState, void, struct {
+        const Drive = state.Drive(SplitState, void);
+        pub fn drive(s: SplitState) void {
+            var now: *Dict = s.this.dict.load(std.atomic.Ordering.Monotonic);
+
+            if (!now.copied) {
+                // do better things with our time than wait for a copie.
+                // maybe we can bake some cake... :)
+                return Drive{ .Incomplete = s };
+            }
+
+            // test if the smallmap would fit into the dict
+            if (now.level < s.with.level) {
+                const next_level = now.level + 1;
+                if (next_level > s.this.max_expansions) {
+                    // TODO: yeah, no, check this before you create the machine. I know you can do this
+                    unreachable;
+                }
+
+                // extend dict
+                if (s.this.expansion_ptrs[next_level].tryLock()) |next| {
+                    var maybe_expandet: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                    // double checked lock
+                    if (maybe_expandet == now) {
+                        // the dict was not yet expandet and we have the honor to expand it
+                        s.this.dict.store(next, std.atomic.Ordering.Monotonic);
+
+                        // copy all small map references so everything stays legal
+                        var copy_idx = 1 << maybe_expandet.level;
+                        while (copy_idx < (1 << now.level)) : (copy_idx += 1) {
+                            next.segments[copy_idx].store(next.segments[copy_idx + (1 << now.level)].load(std.atomic.Ordering.Monotonic), std.atomic.Ordering.Monotonic);
+                        }
+
+                        // We've copied
+                        now.copied = true;
+                        s.this.dict.store(next, std.atomic.Ordering.Release);
+
+                        now = next;
+                    } else {
+                        // the dict was expandet therefore the new smallmap level _must_ fit.
+                        now = maybe_expandet;
+                    }
+                    s.this.expansion_ptrs[next_level].unlock();
+                } else {
+                    // we need an expansion but someone else is currently expanding or something...
+                    return Drive{ .Incomplete = s };
+                }
+            }
+
+            const dict_level = now.level;
+            // the mask to find the first idx of the smallmap in the dict
+            const map_idx_mask = (1 << @intCast(s.with.level));
+            // the first idx to find the `with` map
+            var idx = (s.hash & (map_idx_mask - 1)) + map_idx_mask;
+
+            // splitting by inserting the new `with` smallmap at the right places
+            while (idx < (1 << dict_level)) : (idx += map_idx_mask << 1) {
+                now.segments[idx].store(s.with, std.atomic.Ordering.Monotonic);
+            }
+
+            // verify that the dict didn't increase in size while we weren't looking
+            // this should _almost_ never happen as the dict can only be expanded around 30 times
+            const then = s.this.dict.load(std.atomic.Ordering.Monotonic);
+            if (now != then) {
+                // retry this operation for the full dict
+                return Drive{ .Incomplete = s };
+            }
+            return Drive{ .Complete = {} };
+        }
+    }.drive);
+
+    // Null indicates OOM or OOS
+    pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
+        var tmp: SmallMap = small_map.*;
+        var second_map: *SmallMap = allocator.allocate(SmallMap).?;
+        const next_level = small_map.level + 1;
+
+        if (next_level > this.max_expansions) {
+            // we cant expand beyond this magic
+            return null;
+        }
+
+        small_map.clear(small_map.level + 1);
+        second_map.clear(small_map.level + 1);
+        small_map.fillFromSplit(&tmp, 0);
+        second_map.fillFromSplit(&tmp, 1);
+        return SplitMachine.init(SplitState{
+            .this = this,
+            .hash = hash,
+            .with = small_map,
         });
     }
 };
