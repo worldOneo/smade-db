@@ -559,8 +559,14 @@ pub const ExtendibleMap = struct {
 
                         now = next;
                     } else {
-                        // the dict was expandet therefore the new smallmap level _must_ fit.
-                        now = maybe_expandet;
+                        if (maybe_expandet.copied) {
+                            // the dict was expandet therefore the new smallmap level _must_ fit.
+                            now = maybe_expandet;
+                        } else {
+                            // someone else is expanding, well wait...
+                            s.this.expansion_ptrs[next_level].unlock();
+                            return Drive{ .Incomplete = s };
+                        }
                     }
                     s.this.expansion_ptrs[next_level].unlock();
                 } else {
