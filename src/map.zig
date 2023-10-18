@@ -409,15 +409,12 @@ pub const ExtendibleMap = struct {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
             var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-            if (@intFromPtr(map_lock) == 0x1900000000000000) {
-                std.debug.print("Idx = {}, lvl = {}, ptr = {*}\n", .{ idx, dict.level, map_lock });
-            }
             if (map_lock.tryLock()) |map| {
                 // Dash Algorithm 3 line 11
                 // see ReadMachine
 
                 const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-                const new_idx = currentIdx(dict, s.hash);
+                const new_idx = currentIdx(new_dict, s.hash);
                 const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
 
                 if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
@@ -719,6 +716,8 @@ test "map.ExtendibleMap single" {
     try map.setup(16, std.heap.page_allocator, &la);
     std.debug.print("\nis setup\n", .{});
 
+    var now = try std.time.Timer.start();
+
     for (0..1_000_000) |i| {
         // std.debug.print("Inserting key {}\n", .{i});
         const k = string.String.fromInt(@intCast(i));
@@ -734,7 +733,6 @@ test "map.ExtendibleMap single" {
                     break;
                 },
                 SmallMap.Result.Split => {
-                    std.debug.print("\nSplitting {*}\n", .{m.map});
                     var machine = map.split(h, m.map, &la) orelse unreachable;
                     var second: ExtendibleMap.AcquireResult = machine.run();
                     second.lock.unlock();
@@ -743,6 +741,8 @@ test "map.ExtendibleMap single" {
             m.lock.unlock();
         }
     }
+
+    std.debug.print("1Mops writes in {}ms\n", .{now.lap() / std.time.ns_per_ms});
 
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
         const Drive = state.Drive(string.String, bool);
@@ -768,6 +768,13 @@ test "map.ExtendibleMap single" {
         );
         try expect(reader.run());
     }
+
+    std.debug.print("1Mops reads in {}ms\n", .{now.lap() / std.time.ns_per_ms});
+
+    for (0..1_000_000) |i| {
+        _ = string.String.fromInt(@intCast(i));
+    }
+    std.debug.print("1Mops fromInt in {}ms\n", .{now.lap() / std.time.ns_per_ms});
 }
 
 test "map.SmallMap.basic" {

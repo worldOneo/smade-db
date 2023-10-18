@@ -27,14 +27,25 @@ pub const String = struct {
 
         var powers: i64 = 18;
         var written = false;
+
+        const power_arr = comptime blk: {
+            const i64_powers = 19;
+            var p = [_]i64{0} ** i64_powers;
+            for (0..i64_powers) |i| {
+                p[i] = std.math.pow(i64, 10, i);
+            }
+            break :blk p;
+        };
+
+        while (powers > -1 and power_arr[@intCast(powers)] > num) : (powers -= 1) {}
+
         while (powers > -1) : (powers -= 1) {
-            const power = std.math.pow(i64, 10, powers);
-            const digit = @divFloor(num, power);
+            const digit = @divFloor(num, power_arr[@intCast(powers)]);
             if (written or digit > 0) {
                 written = true;
                 sms[pos] = '0' + @as(u8, @intCast(digit));
                 pos += 1;
-                num -= digit * power;
+                num -= digit * power_arr[@intCast(powers)];
             }
         }
 
