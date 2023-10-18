@@ -17,16 +17,8 @@ pub const String = struct {
         var inner = [3]usize{ 0, 0, 0 };
         var sms = @as(*[24]u8, @ptrCast(&inner));
         sms[23] = 1;
-        var num = integer;
-        var pos: usize = 0;
-        if (num < 0) {
-            sms[pos] = '-';
-            num = -num;
-            pos += 1;
-        }
 
-        var powers: i64 = 18;
-        var written = false;
+        const chars = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899";
 
         const power_arr = comptime blk: {
             const i64_powers = 19;
@@ -37,24 +29,68 @@ pub const String = struct {
             break :blk p;
         };
 
-        while (powers > -1 and power_arr[@intCast(powers)] > num) : (powers -= 1) {}
+        // Estimate digits based on leading zeros
+        const clz_digits_arr = comptime blk: {
+            @setEvalBranchQuota(10000);
+            var d = [_]u8{1} ** 65;
+            const one: u64 = 1;
+            for (0..63) |z| {
+                const num = one << z;
+                var digits = 18;
+                while (power_arr[digits - 1] > num) : (digits -= 1) {}
+                d[63 - z] = digits + 1;
+            }
+            break :blk d;
+        };
 
-        while (powers > -1) : (powers -= 1) {
-            const digit = @divFloor(num, power_arr[@intCast(powers)]);
-            if (written or digit > 0) {
-                written = true;
-                sms[pos] = '0' + @as(u8, @intCast(digit));
-                pos += 1;
-                num -= digit * power_arr[@intCast(powers)];
+        var neg: usize = 0;
+        if (integer < 0) {
+            sms[0] = '-';
+            neg += 1;
+        }
+
+        var l: usize = 0;
+        if (integer == -9223372036854775808) {
+            // This number cant be turned positive because it overflows.
+            // Therefore we give it a special case <3
+            l = 20;
+            @memcpy(sms[0..20], "-9223372036854775808");
+        } else if (integer == 0) {
+            l = 1;
+            sms[0] = '0';
+        } else {
+            var num: u64 = @bitCast(if (integer < 0) -integer else integer);
+            var digit_count: usize = @intCast(clz_digits_arr[@clz(num)]);
+
+            // Estimated digits might be off by 1. Adjusting here
+            if (power_arr[@intCast(digit_count - 1)] > num) {
+                digit_count -= 1;
+            }
+
+            digit_count += neg;
+            l = digit_count;
+
+            // 2 digits at a time into the string to save some divs.
+            while (num >= 100) {
+                const digit = num % 100;
+                num /= 100;
+                sms[digit_count - 1] = chars[@intCast(digit * 2 + 1)];
+                sms[digit_count - 2] = chars[@intCast(digit * 2)];
+                digit_count -= 2;
+            }
+
+            if (num != 0 and num < 10) {
+                sms[digit_count - 1] = '0' + @as(u8, @intCast(num));
+            } else if (num != 0) {
+                const digit = num % 100;
+                num /= 100;
+                sms[digit_count - 1] = chars[@intCast(digit * 2 + 1)];
+                sms[digit_count - 2] = chars[@intCast(digit * 2)];
+                digit_count -= 2;
             }
         }
 
-        if (!written) {
-            sms[pos] = '0';
-            pos += 1;
-        }
-        sms[23] = @intCast((pos << 2) | 1);
-
+        sms[23] = @intCast((l << 2) | 1);
         const value = This{ .value = inner };
         return value;
     }
@@ -178,16 +214,26 @@ test "string.String.fromInt" {
     const s0 = String.fromInt(0);
     const s1 = String.fromInt(1);
     const s_1 = String.fromInt(-1);
+    const s8 = String.fromInt(8);
+    const s15 = String.fromInt(15);
     const s1234 = String.fromInt(1234);
     const s_1234 = String.fromInt(-1234);
     const s2345678901 = String.fromInt(2345678901);
     const s_2345678901 = String.fromInt(-2345678901);
+    const spow_63 = String.fromInt((1 << 63) - 1);
+    const s_pow_63 = String.fromInt(-(1 << 63));
+    const s_pow_63_1 = String.fromInt(-(1 << 63) + 1);
 
     try expect(std.mem.eql(u8, s0.sliceView(), "0"));
     try expect(std.mem.eql(u8, s1.sliceView(), "1"));
     try expect(std.mem.eql(u8, s_1.sliceView(), "-1"));
+    try expect(std.mem.eql(u8, s8.sliceView(), "8"));
+    try expect(std.mem.eql(u8, s15.sliceView(), "15"));
     try expect(std.mem.eql(u8, s1234.sliceView(), "1234"));
     try expect(std.mem.eql(u8, s_1234.sliceView(), "-1234"));
     try expect(std.mem.eql(u8, s2345678901.sliceView(), "2345678901"));
     try expect(std.mem.eql(u8, s_2345678901.sliceView(), "-2345678901"));
+    try expect(std.mem.eql(u8, spow_63.sliceView(), "9223372036854775807"));
+    try expect(std.mem.eql(u8, s_pow_63.sliceView(), "-9223372036854775808"));
+    try expect(std.mem.eql(u8, s_pow_63_1.sliceView(), "-9223372036854775807"));
 }
