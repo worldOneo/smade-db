@@ -214,7 +214,8 @@ pub const SmallMap = struct {
     // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
     // if Result.Split the key is owned by caller and nothing has been changed
     pub fn updateOrCreate(this: *This, hash: u64, key: string.String) Result {
-        if (this.size == @as(u16, @intCast(smallMapEntries))) {
+        if (this.size == @as(u16, @intCast(smallMapEntries - (smallMapEntries / 25)))) {
+            // - smallMapEntries / 25 is a small buffer to avoid very long runs on insert
             return .Split;
         }
 
