@@ -77,7 +77,7 @@ pub const String = struct {
         var sms: *SmallString = @ptrCast(this);
         const length = this.smallSize();
         if (length + data.len > 23) {
-            const new = allocator.allocateSlice(u8, length + data.len).?;
+            const new = allocator.allocateSlice(u8, length + data.len) orelse return null;
             @memcpy(new[0..length], sms.data[0..length]);
             @memcpy(new[length..(length + data.len)], data);
             const largeString = LargeString{ .length = length + data.len, .capacity = new.len, .data = @ptrCast(new) };
@@ -94,7 +94,7 @@ pub const String = struct {
         var thisLarge: *LargeString = @ptrCast(this);
         const length = thisLarge.length;
         if (length + data.len > thisLarge.capacity) {
-            const new = allocator.allocateSlice(u8, length + data.len).?;
+            const new = allocator.allocateSlice(u8, length + data.len) orelse return null;
             @memcpy(new[0..length], thisLarge.data[0..length]);
             @memcpy(new[length..(length + data.len)], data);
             allocator.freeSlice(u8, thisLarge.data[0..thisLarge.capacity]);

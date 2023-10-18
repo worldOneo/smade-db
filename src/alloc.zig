@@ -91,13 +91,11 @@ const Page = struct {
             this.free_list = free_list.next;
             return @ptrCast(@alignCast(alloc));
         }
-        if (this.bump_idx < pageSizeInBlocks and this.bump_idx + size <= pageSizeInBlocks) {
+        if (this.bump_idx + size <= bytesInPage) {
             allocLog("thread {} allocating size {} for page {*} from bump\n", .{ std.Thread.getCurrentId(), size, this });
             var alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
             this.bump_idx += size;
-            if (this.bump_idx <= pageSizeInBlocks) {
-                return @ptrCast(@alignCast(alloc));
-            }
+            return @ptrCast(@alignCast(alloc));
         }
 
         this.used -= 1;
@@ -275,7 +273,7 @@ const SizeClass = struct {
                 return allocated;
             }
         }
-        allocLog("thread {} allocating slow in size class {*}\n", .{ std.Thread.getCurrentId(), this });
+        allocLog("thread {} allocating slow in size class {*} for {} bytes.\n", .{ std.Thread.getCurrentId(), this, n });
         // slow path called on a regular base to do all the work not needded to be done in the fast path
         return this.allocateSlow(T, n);
     }
@@ -372,7 +370,7 @@ const SizeClass = struct {
     }
 };
 
-const sizeClasses = 48;
+const maxSizeClass = 48;
 
 fn msbOnly(const_size: usize) usize {
     const lz = @clz(const_size);
@@ -395,12 +393,12 @@ fn sizeClassOf(size: usize) usize {
 }
 
 pub const LocalAllocator = struct {
-    class_pages: [sizeClasses]SizeClass,
+    class_pages: [maxSizeClass + 1]SizeClass,
     global_allocator: *GlobalAllocator,
     const This = @This();
 
     pub fn init(global_alloc: *GlobalAllocator) This {
-        const a = [_]SizeClass{SizeClass.init(global_alloc)} ** sizeClasses;
+        const a = [_]SizeClass{SizeClass.init(global_alloc)} ** (maxSizeClass + 1);
         return This{ .class_pages = a, .global_allocator = global_alloc };
     }
 
@@ -423,6 +421,10 @@ pub const LocalAllocator = struct {
     pub fn allocate(this: *This, comptime T: type) ?*T {
         const size = @sizeOf(T);
         const class = sizeClassOf(size);
+        if (class > maxSizeClass) {
+            unreachable("Allocation to big for small allocator");
+            return null;
+        }
         return this.class_pages[class].allocate(T);
     }
 
@@ -587,5 +589,5 @@ test "alloc.sizeClass" {
     try expectEq(1 + z, sizeClassOf(10));
     try expectEq(1 + z, sizeClassOf(9));
     try expectEq(0 + z, sizeClassOf(8));
-    try expectEq(sizeClasses + z, sizeClassOf(pageSizeInBlocks * 8));
+    try expectEq(maxSizeClass + z, sizeClassOf(pageSizeInBlocks * 8));
 }

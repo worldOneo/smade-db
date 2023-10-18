@@ -34,7 +34,7 @@ const List = struct {
     }
 
     fn newNode(str: string.String, allocator: *alloc.LocalAllocator) ?*Node {
-        const node = allocator.allocate(Node).?;
+        const node = allocator.allocate(Node) orelse return null;
         node.next = null;
         node.prev = null;
         node.value = str;
@@ -163,7 +163,7 @@ pub const Entry = struct {
     }
 };
 
-const smallMapEntries: usize = 1021; // a nice prime number, consider 509, 251, or 127
+const smallMapEntries: usize = 577; // a nice prime which fits into one allocator page, consider 509, 251, or 127
 
 pub const SmallMap = struct {
     level: u8,
@@ -173,16 +173,16 @@ pub const SmallMap = struct {
     const This = @This();
 
     const presentMask: u64 = 1 << 63;
-    const distanceMask: u64 = 0b111 << 60;
+    const distanceMask: u64 = 0b1111 << 59;
     const hashMask: u64 = (~(presentMask | distanceMask));
-    const maxDist: u64 = 7;
+    const maxDist: u64 = 15;
 
     fn isMetaPresent(metadata: u64) bool {
         return metadata & presentMask == presentMask;
     }
 
     fn distanceOfMeta(metadata: u64) u64 {
-        return (metadata & distanceMask) >> 60;
+        return (metadata & distanceMask) >> 59;
     }
 
     fn hashOfMeta(metadata: u64) u64 {
@@ -190,7 +190,7 @@ pub const SmallMap = struct {
     }
 
     fn metaOfDistanceAndHash(hash: u64, distance: u64) u64 {
-        return (hash & hashMask) | (distance << 60) | presentMask;
+        return (hash & hashMask) | (distance << 59) | presentMask;
     }
 
     fn cutHash(hash: u64) u64 {
@@ -385,7 +385,7 @@ pub const ExtendibleMap = struct {
 
     fn currentIdx(dict: *Dict, hash: u64) u64 {
         var level = dict.level;
-        if (dict.copied == false) {
+        if (!dict.copied) {
             level -= 1;
         }
         const one: u64 = 1;
@@ -408,7 +408,10 @@ pub const ExtendibleMap = struct {
         fn drive(s: AcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
-            var map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            if (@intFromPtr(map_lock) == 0x1900000000000000) {
+                std.debug.print("Idx = {}, lvl = {}, ptr = {*}\n", .{ idx, dict.level, map_lock });
+            }
             if (map_lock.tryLock()) |map| {
                 // Dash Algorithm 3 line 11
                 // see ReadMachine
@@ -432,12 +435,6 @@ pub const ExtendibleMap = struct {
             .hash = hash,
             .this = this,
         });
-    }
-
-    pub fn release(this: *This, hash: u64) void {
-        var dict = this.dict.value; // this is fine because we have locked the hash
-        var map = dict[hash % dict.len].load(std.atomic.Ordering.Monotonic);
-        map.unlock();
     }
 
     pub fn ReadState(comptime DepMachine: type, comptime Creator: type) type {
@@ -556,6 +553,8 @@ pub const ExtendibleMap = struct {
         hash: u64,
     };
 
+    const dict_level_zero = 4;
+
     pub const SplitMachine = state.Machine(SplitState, AcquireResult, struct {
         const Drive = state.Drive(SplitState, AcquireResult);
         pub fn drive(s: SplitState) Drive {
@@ -571,13 +570,14 @@ pub const ExtendibleMap = struct {
             // test if the smallmap would fit into the dict
             if (now.level < s.with.value.level) {
                 const next_level = now.level + 1;
-                if (next_level > s.this.max_expansions) {
+                const next_idx = next_level - dict_level_zero;
+                if (next_level > s.this.max_expansions + dict_level_zero) {
                     // TODO: yeah, no, check this before you create the machine. I know you can do this
                     unreachable;
                 }
 
                 // extend dict
-                if (s.this.expansion_ptrs[next_level].tryLock()) |l_next| {
+                if (s.this.expansion_ptrs[next_idx].tryLock()) |l_next| {
                     var next = l_next.*;
                     var maybe_expandet: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
                     // double checked lock
@@ -588,12 +588,13 @@ pub const ExtendibleMap = struct {
                         // copy all small map references so everything stays legal
                         var copy_idx: u64 = 0;
                         const now_level: u6 = @intCast(now.level);
-                        while (copy_idx < (one << now_level)) : (copy_idx += 1) {
-                            next.segments[copy_idx + (one << now_level)].store(next.segments[copy_idx].load(std.atomic.Ordering.Monotonic), std.atomic.Ordering.Monotonic);
+                        const next_zero = (one << now_level);
+                        while (copy_idx < next_zero) : (copy_idx += 1) {
+                            next.segments[copy_idx + next_zero].store(next.segments[copy_idx].load(std.atomic.Ordering.Monotonic), std.atomic.Ordering.Monotonic);
                         }
 
                         // We've copied
-                        now.copied = true;
+                        next.copied = true;
                         s.this.dict.store(next, std.atomic.Ordering.Release);
 
                         now = next;
@@ -603,11 +604,11 @@ pub const ExtendibleMap = struct {
                             now = maybe_expandet;
                         } else {
                             // someone else is expanding, well wait...
-                            s.this.expansion_ptrs[next_level].unlock();
+                            s.this.expansion_ptrs[next_idx].unlock();
                             return Drive{ .Incomplete = s };
                         }
                     }
-                    s.this.expansion_ptrs[next_level].unlock();
+                    s.this.expansion_ptrs[next_idx].unlock();
                 } else {
                     // we need an expansion but someone else is currently expanding or something...
                     return Drive{ .Incomplete = s };
@@ -615,8 +616,9 @@ pub const ExtendibleMap = struct {
             }
 
             const dict_level: u6 = @intCast(now.level);
+            const old_map_level = s.with.value.level - 1;
             // the mask to find the first idx of the smallmap in the dict
-            const map_idx_mask = (one << @intCast(s.with.value.level));
+            const map_idx_mask = (one << @intCast(old_map_level));
             // the first idx to find the `with` map
             var idx = (s.hash & (map_idx_mask - 1)) + map_idx_mask;
 
@@ -642,20 +644,23 @@ pub const ExtendibleMap = struct {
     // Null indicates OOM or OOS
     pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
         var tmp: SmallMap = small_map.*;
-        var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)).?;
+        var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)) orelse return null;
         const next_level = small_map.level + 1;
 
-        if (next_level > this.max_expansions) {
+        if (next_level > this.max_expansions + dict_level_zero) {
             // we cant expand beyond this magic
             return null;
         }
 
-        small_map.clear(small_map.level + 1);
-        second_map.* = lock.OptLock(SmallMap).init(small_map.*);
+        small_map.clear(next_level);
+        second_map.version.store(0, std.atomic.Ordering.Monotonic);
+        second_map.value.clear(next_level);
+
         small_map.fillFromSplit(&tmp, 0);
-        second_map.value.fillFromSplit(&tmp, 1);
+        var second: *SmallMap = &second_map.value;
+        second.fillFromSplit(&tmp, 1);
         while (second_map.tryLock() == null) {
-            // this isnt bussy as tryLock is uncontendet
+            // this isn't bussy as tryLock is uncontendet
         }
         return SplitMachine.init(SplitState{
             .this = this,
@@ -664,25 +669,26 @@ pub const ExtendibleMap = struct {
         });
     }
 
-    pub fn init(max_expansions: u64, slab_allocator: std.mem.Allocator, local_allocator: *alloc.LocalAllocator) ExtendibleMapError!This {
+    pub fn setup(this: *This, max_expansions: u64, slab_allocator: std.mem.Allocator, local_allocator: *alloc.LocalAllocator) ExtendibleMapError!void {
         if (max_expansions > maxDictExpansions) {
             return ExtendibleMapError.MapExpansionLimit;
         }
 
+        std.debug.print("Allocating map\n", .{});
         const one: u64 = 1;
-        const entries: u64 = 16 * (one << @as(u6, @intCast(max_expansions)));
+        const entries: u64 = 16 * (one << @as(u6, @intCast(max_expansions + 1)));
         var backing_slab = slab_allocator.alloc(std.atomic.Atomic(*lock.OptLock(SmallMap)), entries) catch return ExtendibleMapError.SlabAllocation;
-        var expansions: [maxDictExpansions]Dict = undefined;
-        var expansion_ptrs: [maxDictExpansions]lock.OptLock(*Dict) = undefined;
+        std.debug.print("Allocated map; Setting up expansions\n", .{});
 
         // setup expansions
-        for (0..max_expansions) |i| {
-            expansions[i].copied = false;
-            expansions[i].level = 4 + i;
-            expansions[i].segments = backing_slab[0..(16 * (one << @intCast(i)))];
-            expansion_ptrs[i] = lock.OptLock(*Dict).init(&expansions[i]);
+        for (0..(max_expansions + 1)) |i| {
+            this.expansions[i].copied = false;
+            this.expansions[i].level = 4 + i;
+            this.expansions[i].segments = backing_slab[0..(16 * (one << @intCast(i)))];
+            this.expansion_ptrs[i] = lock.OptLock(*Dict).init(&this.expansions[i]);
         }
 
+        std.debug.print("Setup expansions; initializing small map\n", .{});
         // setup slab
         var first_map: *lock.OptLock(SmallMap) = local_allocator.allocate(lock.OptLock(SmallMap)) orelse return ExtendibleMapError.MapAllocation;
         first_map.value.clear(0);
@@ -690,13 +696,12 @@ pub const ExtendibleMap = struct {
         for (0..16) |i| {
             backing_slab[i].store(first_map, std.atomic.Ordering.Monotonic);
         }
+        this.expansions[0].copied = true;
 
-        return This{
-            .dict = std.atomic.Atomic(*Dict).init(&expansions[0]),
-            .expansions = expansions,
-            .expansion_ptrs = expansion_ptrs,
-            .max_expansions = max_expansions,
-        };
+        std.debug.print("Initialized small map\n", .{});
+
+        this.dict = std.atomic.Atomic(*Dict).init(&this.expansions[0]);
+        this.max_expansions = max_expansions;
     }
 };
 
@@ -707,11 +712,15 @@ const ExtendibleMapError = error{
 };
 
 test "map.ExtendibleMap single" {
-    var ga = try alloc.GlobalAllocator.init(1000, std.heap.page_allocator);
+    var ga = try alloc.GlobalAllocator.init(10000, std.heap.page_allocator);
     var la = alloc.LocalAllocator.init(&ga);
-    var map = try ExtendibleMap.init(16, std.heap.page_allocator, &la);
+    std.debug.print("\nSetting map up\n", .{});
+    var map: ExtendibleMap = undefined;
+    try map.setup(16, std.heap.page_allocator, &la);
+    std.debug.print("\nis setup\n", .{});
 
     for (0..1_000_000) |i| {
+        // std.debug.print("Inserting key {}\n", .{i});
         const k = string.String.fromInt(@intCast(i));
         const h = k.hash();
         while (true) {
@@ -719,8 +728,13 @@ test "map.ExtendibleMap single" {
             var m: ExtendibleMap.AcquireResult = acquire_machine.run();
             switch (m.map.updateOrCreate(h, k)) {
                 SmallMap.Result.Present => unreachable,
-                SmallMap.Result.Absent => |ptr| ptr.* = Value.fromString(k),
+                SmallMap.Result.Absent => |ptr| {
+                    ptr.* = Value.fromString(k);
+                    m.lock.unlock();
+                    break;
+                },
                 SmallMap.Result.Split => {
+                    std.debug.print("\nSplitting {*}\n", .{m.map});
                     var machine = map.split(h, m.map, &la) orelse unreachable;
                     var second: ExtendibleMap.AcquireResult = machine.run();
                     second.lock.unlock();
