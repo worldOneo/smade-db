@@ -112,6 +112,27 @@ pub const Value = struct {
         return true;
     }
 
+    pub fn fromString(const_str: string.String) Value {
+        var str = const_str;
+        return .{ .value = @as(*[3]usize, @ptrCast(&str)).* };
+    }
+
+    fn constCast(comptime Result: type, comptime Fn: *const fn (*This) ?*Result) *const fn (*const This) ?*const Result {
+        return struct {
+            fn cast(this: *const This) ?*const Result {
+                var var_this = @constCast(this);
+                if (Fn(var_this)) |v| {
+                    return v;
+                }
+                return null;
+            }
+        }.cast;
+    }
+
+    pub fn asConstString(this: *const This) ?*const string.String {
+        return constCast(string.String, asString)(this);
+    }
+
     pub fn asString(this: *This) ?*string.String {
         const valueTag = this.tag();
         if (valueTag == .LargeString or valueTag == .SmallString) {
@@ -120,9 +141,8 @@ pub const Value = struct {
         return null;
     }
 
-    pub fn fromString(const_str: string.String) Value {
-        var str = const_str;
-        return .{ .value = @as(*[3]usize, @ptrCast(&str)).* };
+    pub fn asCOnstList(this: *const This) ?*const List {
+        return constCast(List, asList)(this);
     }
 
     pub fn asList(this: *This) ?*List {
@@ -274,7 +294,7 @@ pub const SmallMap = struct {
         return Result{ .Absent = v_ptr };
     }
 
-    pub fn get(this: *This, hash: u64, key: *const string.String) ?*Value {
+    pub fn get(this: *const This, hash: u64, key: *const string.String) ?*const Value {
         const shifted_hash = hash >> @intCast(this.level);
         const starting_pos = shifted_hash % smallMapEntries;
         var pos = starting_pos;
@@ -334,8 +354,8 @@ pub const SmallMap = struct {
 
     fn fillFromSplit(this: *This, data: *This, bit: u64) void {
         for (0..smallMapEntries) |i| {
-            if (isMetaPresent(data.entries[i]) and
-                hashOfMeta(data.entries[i]) & 1 == bit)
+            if (isMetaPresent(data.entries[i].metadata) and
+                hashOfMeta(data.entries[i].metadata) & 1 == bit)
             {
                 switch (this.updateOrCreate(data.entries[i].key.hash(), data.entries[i].key)) {
                     Result.Absent => |v| v.* = data.entries[i].value,
@@ -363,28 +383,34 @@ pub const ExtendibleMap = struct {
 
     const This = @This();
 
-    const AcquireState = struct {
-        hash: u64,
-        this: *This,
-    };
-
     fn currentIdx(dict: *Dict, hash: u64) u64 {
         var level = dict.level;
         if (dict.copied == false) {
             level -= 1;
         }
-        const idx = hash & ((1 << level) - 1);
+        const one: u64 = 1;
+        const idx = hash & ((one << @intCast(level)) - 1);
         return idx;
     }
 
-    pub const AcquireMachine = state.Machine(AcquireState, *SmallMap, struct {
-        const Drive = state.Drive(AcquireState, *SmallMap);
+    const AcquireState = struct {
+        hash: u64,
+        this: *This,
+    };
+
+    pub const AcquireResult = struct {
+        map: *SmallMap,
+        lock: *lock.OptLock(SmallMap),
+    };
+
+    pub const AcquireMachine = state.Machine(AcquireState, AcquireResult, struct {
+        const Drive = state.Drive(AcquireState, AcquireResult);
         fn drive(s: AcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
             var map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
             if (map_lock.tryLock()) |map| {
-                // Dash Algorithm 3 line 15
+                // Dash Algorithm 3 line 11
                 // see ReadMachine
 
                 const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
@@ -395,7 +421,7 @@ pub const ExtendibleMap = struct {
                     map_lock.unlock();
                     return Drive{ .Incomplete = s };
                 }
-                return Drive{ .Complete = map };
+                return Drive{ .Complete = .{ .map = map, .lock = map_lock } };
             }
             return Drive{ .Incomplete = s };
         }
@@ -441,10 +467,10 @@ pub const ExtendibleMap = struct {
                     State.Preparing => |const_prep| {
                         var prep = const_prep;
 
-                        var read_dict = prep.this.dict.load(std.atomic.Ordering.Acquire);
+                        var read_dict: *Dict = prep.this.dict.load(std.atomic.Ordering.Acquire);
                         const idx = currentIdx(read_dict, prep.hash);
 
-                        var map_lock = read_dict.value.level[idx].load(std.atomic.Ordering.Monotonic);
+                        var map_lock = read_dict.segments[idx].load(std.atomic.Ordering.Monotonic);
                         if (map_lock.startRead()) |lock_read| {
 
                             // Things couldve happend between calculating the index and acquiring read permission for the small map.
@@ -457,15 +483,15 @@ pub const ExtendibleMap = struct {
                             // We loaded the pointer to old_low, it split into high, low, we read from low, while our key was moved to high.
                             // Therefore we need to double check.
 
-                            // See: Dash Alogorithm 3 line 15
+                            // See: Dash Alogorithm 3 line 11
 
                             var new_read_dict = prep.this.dict.load(std.atomic.Ordering.Acquire);
                             const new_idx = currentIdx(new_read_dict, prep.hash);
                             if (new_idx != idx or
                                 new_read_dict != read_dict or
-                                map_lock != read_dict.value.level[idx].load(std.atomic.Ordering.Monotonic))
+                                map_lock != read_dict.segments[idx].load(std.atomic.Ordering.Monotonic))
                             {
-                                return State{ .Incomplete = s };
+                                return Drive{ .Incomplete = s };
                             }
 
                             return drive(State{
@@ -483,7 +509,7 @@ pub const ExtendibleMap = struct {
                     },
                     State.Driving => |const_driving| {
                         var driving = const_driving;
-                        if (driving.machine.drive(driving.read.value)) |result| {
+                        if (driving.machine.step_drive(driving.read.data)) |result| {
                             if (driving.lock.verifyRead(driving.read)) {
                                 return Drive{ .Complete = result };
                             } else {
@@ -497,15 +523,25 @@ pub const ExtendibleMap = struct {
                                 } };
                             }
                         }
-                        return Drive{ .Incomplete = driving };
+
+                        return Drive{ .Incomplete = State{
+                            .Driving = .{
+                                .hash = driving.hash,
+                                .this = driving.this,
+                                .creator = driving.creator,
+                                .read = driving.read,
+                                .machine = driving.machine,
+                                .lock = driving.lock,
+                            },
+                        } };
                     },
                 }
             }
         }.drive);
     }
 
-    pub fn read(this: *This, hash: u64, comptime DepMachine: type, comptime Creator: type, creator: Creator) ReadMachine(DepMachine, Creator) {
-        return ReadMachine(DepMachine, Creator).init(ReadState(DepMachine, Creator){
+    pub fn read(this: *This, hash: u64, comptime DepMachine: type, comptime Creator: type, comptime Result: type, creator: Creator) ReadMachine(DepMachine, Creator, Result) {
+        return ReadMachine(DepMachine, Creator, Result).init(ReadState(DepMachine, Creator){
             .Preparing = .{
                 .hash = hash,
                 .this = this,
@@ -516,13 +552,14 @@ pub const ExtendibleMap = struct {
 
     const SplitState = struct {
         this: *This,
-        with: *SmallMap,
+        with: *lock.OptLock(SmallMap),
         hash: u64,
     };
 
-    pub const SplitMachine = state.Machine(SplitState, void, struct {
-        const Drive = state.Drive(SplitState, void);
-        pub fn drive(s: SplitState) void {
+    pub const SplitMachine = state.Machine(SplitState, AcquireResult, struct {
+        const Drive = state.Drive(SplitState, AcquireResult);
+        pub fn drive(s: SplitState) Drive {
+            const one: u64 = 1;
             var now: *Dict = s.this.dict.load(std.atomic.Ordering.Monotonic);
 
             if (!now.copied) {
@@ -532,7 +569,7 @@ pub const ExtendibleMap = struct {
             }
 
             // test if the smallmap would fit into the dict
-            if (now.level < s.with.level) {
+            if (now.level < s.with.value.level) {
                 const next_level = now.level + 1;
                 if (next_level > s.this.max_expansions) {
                     // TODO: yeah, no, check this before you create the machine. I know you can do this
@@ -540,7 +577,8 @@ pub const ExtendibleMap = struct {
                 }
 
                 // extend dict
-                if (s.this.expansion_ptrs[next_level].tryLock()) |next| {
+                if (s.this.expansion_ptrs[next_level].tryLock()) |l_next| {
+                    var next = l_next.*;
                     var maybe_expandet: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
                     // double checked lock
                     if (maybe_expandet == now) {
@@ -548,9 +586,10 @@ pub const ExtendibleMap = struct {
                         s.this.dict.store(next, std.atomic.Ordering.Monotonic);
 
                         // copy all small map references so everything stays legal
-                        var copy_idx = 1 << maybe_expandet.level;
-                        while (copy_idx < (1 << now.level)) : (copy_idx += 1) {
-                            next.segments[copy_idx].store(next.segments[copy_idx + (1 << now.level)].load(std.atomic.Ordering.Monotonic), std.atomic.Ordering.Monotonic);
+                        var copy_idx: u64 = 0;
+                        const now_level: u6 = @intCast(now.level);
+                        while (copy_idx < (one << now_level)) : (copy_idx += 1) {
+                            next.segments[copy_idx + (one << now_level)].store(next.segments[copy_idx].load(std.atomic.Ordering.Monotonic), std.atomic.Ordering.Monotonic);
                         }
 
                         // We've copied
@@ -575,14 +614,14 @@ pub const ExtendibleMap = struct {
                 }
             }
 
-            const dict_level = now.level;
+            const dict_level: u6 = @intCast(now.level);
             // the mask to find the first idx of the smallmap in the dict
-            const map_idx_mask = (1 << @intCast(s.with.level));
+            const map_idx_mask = (one << @intCast(s.with.value.level));
             // the first idx to find the `with` map
             var idx = (s.hash & (map_idx_mask - 1)) + map_idx_mask;
 
             // splitting by inserting the new `with` smallmap at the right places
-            while (idx < (1 << dict_level)) : (idx += map_idx_mask << 1) {
+            while (idx < (one << dict_level)) : (idx += map_idx_mask << 1) {
                 now.segments[idx].store(s.with, std.atomic.Ordering.Monotonic);
             }
 
@@ -593,14 +632,17 @@ pub const ExtendibleMap = struct {
                 // retry this operation for the full dict
                 return Drive{ .Incomplete = s };
             }
-            return Drive{ .Complete = {} };
+            return Drive{ .Complete = .{
+                .lock = s.with,
+                .map = &s.with.value,
+            } };
         }
     }.drive);
 
     // Null indicates OOM or OOS
     pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
         var tmp: SmallMap = small_map.*;
-        var second_map: *SmallMap = allocator.allocate(SmallMap).?;
+        var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)).?;
         const next_level = small_map.level + 1;
 
         if (next_level > this.max_expansions) {
@@ -609,16 +651,110 @@ pub const ExtendibleMap = struct {
         }
 
         small_map.clear(small_map.level + 1);
-        second_map.clear(small_map.level + 1);
+        second_map.* = lock.OptLock(SmallMap).init(small_map.*);
         small_map.fillFromSplit(&tmp, 0);
-        second_map.fillFromSplit(&tmp, 1);
+        second_map.value.fillFromSplit(&tmp, 1);
+        while (second_map.tryLock() == null) {
+            // this isnt bussy as tryLock is uncontendet
+        }
         return SplitMachine.init(SplitState{
             .this = this,
             .hash = hash,
-            .with = small_map,
+            .with = second_map,
         });
     }
+
+    pub fn init(max_expansions: u64, slab_allocator: std.mem.Allocator, local_allocator: *alloc.LocalAllocator) ExtendibleMapError!This {
+        if (max_expansions > maxDictExpansions) {
+            return ExtendibleMapError.MapExpansionLimit;
+        }
+
+        const one: u64 = 1;
+        const entries: u64 = 16 * (one << @as(u6, @intCast(max_expansions)));
+        var backing_slab = slab_allocator.alloc(std.atomic.Atomic(*lock.OptLock(SmallMap)), entries) catch return ExtendibleMapError.SlabAllocation;
+        var expansions: [maxDictExpansions]Dict = undefined;
+        var expansion_ptrs: [maxDictExpansions]lock.OptLock(*Dict) = undefined;
+
+        // setup expansions
+        for (0..max_expansions) |i| {
+            expansions[i].copied = false;
+            expansions[i].level = 4 + i;
+            expansions[i].segments = backing_slab[0..(16 * (one << @intCast(i)))];
+            expansion_ptrs[i] = lock.OptLock(*Dict).init(&expansions[i]);
+        }
+
+        // setup slab
+        var first_map: *lock.OptLock(SmallMap) = local_allocator.allocate(lock.OptLock(SmallMap)) orelse return ExtendibleMapError.MapAllocation;
+        first_map.value.clear(0);
+
+        for (0..16) |i| {
+            backing_slab[i].store(first_map, std.atomic.Ordering.Monotonic);
+        }
+
+        return This{
+            .dict = std.atomic.Atomic(*Dict).init(&expansions[0]),
+            .expansions = expansions,
+            .expansion_ptrs = expansion_ptrs,
+            .max_expansions = max_expansions,
+        };
+    }
 };
+
+const ExtendibleMapError = error{
+    SlabAllocation,
+    MapAllocation,
+    MapExpansionLimit,
+};
+
+test "map.ExtendibleMap single" {
+    var ga = try alloc.GlobalAllocator.init(1000, std.heap.page_allocator);
+    var la = alloc.LocalAllocator.init(&ga);
+    var map = try ExtendibleMap.init(16, std.heap.page_allocator, &la);
+
+    for (0..1_000_000) |i| {
+        const k = string.String.fromInt(@intCast(i));
+        const h = k.hash();
+        while (true) {
+            var acquire_machine = map.acquire(h);
+            var m: ExtendibleMap.AcquireResult = acquire_machine.run();
+            switch (m.map.updateOrCreate(h, k)) {
+                SmallMap.Result.Present => unreachable,
+                SmallMap.Result.Absent => |ptr| ptr.* = Value.fromString(k),
+                SmallMap.Result.Split => {
+                    var machine = map.split(h, m.map, &la) orelse unreachable;
+                    var second: ExtendibleMap.AcquireResult = machine.run();
+                    second.lock.unlock();
+                },
+            }
+            m.lock.unlock();
+        }
+    }
+
+    const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
+        const Drive = state.Drive(string.String, bool);
+        pub fn drive(s: string.String, dep: *const SmallMap) Drive {
+            const value = dep.get(s.hash(), &s) orelse return Drive{ .Complete = false };
+            if (value.asConstString()) |str| {
+                return Drive{ .Complete = str.eql(&s) };
+            }
+            return Drive{ .Complete = false };
+        }
+    }.drive);
+
+    const expect = std.testing.expect;
+
+    for (0..1_000_000) |i| {
+        const k = string.String.fromInt(@intCast(i));
+        var reader = map.read(
+            k.hash(),
+            read_machine,
+            state.TrivialCreator(read_machine),
+            bool,
+            state.trivialCreator(read_machine, read_machine.init(k)),
+        );
+        try expect(reader.run());
+    }
+}
 
 test "map.SmallMap.basic" {
     const expect = std.testing.expect;
@@ -655,7 +791,7 @@ test "map.SmallMap.basic" {
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
         var v_ptr = a.get(k.hash(), &k) orelse unreachable;
-        const as_str = v_ptr.asString() orelse unreachable;
+        const as_str = v_ptr.asConstString() orelse unreachable;
         try expect(as_str.eql(&v));
     }
 
@@ -681,7 +817,7 @@ test "map.SmallMap.basic" {
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
         var v_ptr = a.get(k.hash(), &k) orelse unreachable;
-        const as_str = v_ptr.asString() orelse unreachable;
+        const as_str = v_ptr.asConstString() orelse unreachable;
         try expect(as_str.eql(&v));
     }
 

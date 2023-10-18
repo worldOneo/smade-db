@@ -81,6 +81,15 @@ pub fn DepMachine(comptime State: type, comptime Result: type, comptime Dep: typ
         pub fn drive(this: *This, dep: Dep) Drive(State, Result) {
             return driver(this.state, dep);
         }
+
+        pub fn step_drive(this: *This, dep: Dep) ?Result {
+            const result = this.drive(dep);
+            switch (result) {
+                Drive(State, Result).Complete => |value| return value,
+                Drive(State, Result).Incomplete => |state| this.state = state,
+            }
+            return null;
+        }
     };
 }
 
@@ -143,8 +152,8 @@ pub fn TrivialCreator(comptime Type: type) type {
     return Creator(Type, Type, trivialCreator_fn(Type));
 }
 
-pub fn trivialCreator(comptime Type: type, value: Type) TrivialCreator(type) {
-    return TrivialCreator(type).init(value);
+pub fn trivialCreator(comptime Type: type, value: Type) TrivialCreator(Type) {
+    return TrivialCreator(Type).init(value);
 }
 
 const std = @import("std");
