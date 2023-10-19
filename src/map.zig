@@ -676,11 +676,9 @@ pub const ExtendibleMap = struct {
             return ExtendibleMapError.MapExpansionLimit;
         }
 
-        std.debug.print("Allocating map\n", .{});
         const one: u64 = 1;
         const entries: u64 = 16 * (one << @as(u6, @intCast(max_expansions + 1)));
         var backing_slab = slab_allocator.alloc(std.atomic.Atomic(*lock.OptLock(SmallMap)), entries) catch return ExtendibleMapError.SlabAllocation;
-        std.debug.print("Allocated map; Setting up expansions\n", .{});
 
         // setup expansions
         for (0..(max_expansions + 1)) |i| {
@@ -689,8 +687,6 @@ pub const ExtendibleMap = struct {
             this.expansions[i].segments = backing_slab[0..(16 * (one << @intCast(i)))];
             this.expansion_ptrs[i] = lock.OptLock(*Dict).init(&this.expansions[i]);
         }
-
-        std.debug.print("Setup expansions; initializing small map\n", .{});
         // setup slab
         var first_map: *lock.OptLock(SmallMap) = local_allocator.allocate(lock.OptLock(SmallMap)) orelse return ExtendibleMapError.MapAllocation;
         first_map.value.clear(0);
@@ -699,8 +695,6 @@ pub const ExtendibleMap = struct {
             backing_slab[i].store(first_map, std.atomic.Ordering.Monotonic);
         }
         this.expansions[0].copied = true;
-
-        std.debug.print("Initialized small map\n", .{});
 
         this.dict = std.atomic.Atomic(*Dict).init(&this.expansions[0]);
         this.max_expansions = max_expansions;
@@ -752,7 +746,7 @@ pub fn FixedSizedQueue(comptime T: type, comptime Size: usize) type {
     };
 }
 
-const InsertAndSplitState = struct {
+pub const InsertAndSplitState = struct {
     pub fn init(key: string.String, map: *ExtendibleMap, lalloc: *alloc.LocalAllocator) @This() {
         return .{
             .key = key,
@@ -772,11 +766,11 @@ const InsertAndSplitState = struct {
     },
     acquiremachine: ?ExtendibleMap.AcquireMachine,
 };
-const InsertAndSplitResult = struct {
+pub const InsertAndSplitResult = struct {
     value: *Value,
     acquired: ExtendibleMap.AcquireResult,
 };
-const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndSplitResult, struct {
+pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndSplitResult, struct {
     const Drive = state.Drive(InsertAndSplitState, ?InsertAndSplitResult);
     fn drive(c_s: InsertAndSplitState) Drive {
         var s = c_s;
@@ -823,8 +817,100 @@ const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndSplit
     }
 }.drive);
 
+test "map.ExtendibleMap multi-single" {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var ga = try alloc.GlobalAllocator.init(50000, arena.allocator());
+
+    const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
+        const Drive = state.Drive(string.String, bool);
+        pub fn drive(s: string.String, dep: *const SmallMap) Drive {
+            const value = dep.get(s.hash(), &s) orelse return Drive{ .Complete = false };
+            if (value.asConstString()) |str| {
+                return Drive{ .Complete = str.eql(&s) };
+            }
+            return Drive{ .Complete = false };
+        }
+    }.drive);
+
+    const TestQ = FixedSizedQueue(InsertAndSplitMachine, 100);
+
+    const threadCount = 16;
+    var threads: [threadCount]std.Thread = undefined;
+    var now = try std.time.Timer.start();
+
+    for (0..threadCount) |thread_num| {
+        threads[thread_num] = try std.Thread.spawn(.{}, struct {
+            fn thread(galloc: *alloc.GlobalAllocator, worker_id: usize) void {
+                const offset = 100_000_000 * worker_id;
+                const changes: usize = 1_000_000;
+                var lalloc = alloc.LocalAllocator.init(galloc);
+                var q = TestQ.init();
+                const end = (changes + offset);
+                var location: usize = offset;
+                var smap: ExtendibleMap = undefined;
+
+                smap.setup(16, std.heap.page_allocator, &lalloc) catch {
+                    std.debug.print("Setup failed for {}\n", .{worker_id});
+                    return;
+                };
+
+                while (true) {
+                    var present = false;
+                    while (q.pop()) |machine| {
+                        var ins_spl_machine: InsertAndSplitMachine = machine;
+                        present = true;
+                        if (ins_spl_machine.drive()) |value| {
+                            var v = value orelse unreachable;
+                            v.value.* = Value.fromString(ins_spl_machine.state.key);
+                            v.acquired.lock.unlock();
+                        } else {
+                            _ = q.push(ins_spl_machine);
+                        }
+                    }
+                    while (!q.isFull() and location < end) {
+                        present = true;
+                        _ = q.push(InsertAndSplitMachine.init(InsertAndSplitState.init(
+                            string.String.fromInt(@intCast(location)),
+                            &smap,
+                            &lalloc,
+                        )));
+                        location += 1;
+                    }
+                    if (!present) {
+                        break;
+                    }
+                }
+
+                for (offset..(changes + offset)) |i| {
+                    const k = string.String.fromInt(@intCast(i));
+                    var reader = smap.read(
+                        k.hash(),
+                        read_machine,
+                        state.TrivialCreator(read_machine),
+                        bool,
+                        state.trivialCreator(read_machine, read_machine.init(k)),
+                    );
+                    std.testing.expect(reader.run()) catch {
+                        std.debug.print("A nice crash by {} missing {}\n", .{ worker_id, i });
+                        return;
+                    };
+                }
+            }
+        }.thread, .{ &ga, thread_num });
+    }
+
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    const ms = now.lap() / std.time.ns_per_ms;
+    std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ threadCount, ms, 2_000_000 / ms });
+    arena.deinit();
+}
+
 test "map.ExtendibleMap multi" {
-    var ga = try alloc.GlobalAllocator.init(50000, std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var ga = try alloc.GlobalAllocator.init(50000, arena.allocator());
     var la = alloc.LocalAllocator.init(&ga);
     var m: ExtendibleMap = undefined;
 
@@ -908,15 +994,15 @@ test "map.ExtendibleMap multi" {
 
     const ms = now.lap() / std.time.ns_per_ms;
     std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ threadCount, ms, 2_000_000 / ms });
+    arena.deinit();
 }
 
 test "map.ExtendibleMap single" {
-    var ga = try alloc.GlobalAllocator.init(10000, std.heap.page_allocator);
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    var ga = try alloc.GlobalAllocator.init(10000, arena.allocator());
     var la = alloc.LocalAllocator.init(&ga);
-    std.debug.print("\nSetting map up\n", .{});
     var map: ExtendibleMap = undefined;
     try map.setup(16, std.heap.page_allocator, &la);
-    std.debug.print("\nis setup\n", .{});
 
     var now = try std.time.Timer.start();
 
@@ -974,6 +1060,7 @@ test "map.ExtendibleMap single" {
 
     const read_lap_time = now.lap();
     std.debug.print("1Mops reads in {}ms = {} ops/ms\n", .{ read_lap_time / std.time.ns_per_ms, 1_000_000 / (read_lap_time / std.time.ns_per_ms) });
+    arena.deinit();
 }
 
 test "map.SmallMap.basic" {
