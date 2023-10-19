@@ -162,7 +162,7 @@ pub const Entry = struct {
     }
 };
 
-const smallMapEntries: usize = 577; // a nice prime which fits into one allocator page, consider 509, 251, or 127
+const smallMapEntries: usize = 601; // a nice prime which fits into one allocator page, consider 509, 251, or 127
 
 pub const SmallMap = struct {
     level: u8,
