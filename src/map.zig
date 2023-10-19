@@ -155,7 +155,6 @@ pub const Value = struct {
 };
 
 pub const Entry = struct {
-    metadata: u64,
     key: string.String,
     value: Value,
     pub fn init(k: string.String, v: Value) @This() {
@@ -168,29 +167,37 @@ const smallMapEntries: usize = 577; // a nice prime which fits into one allocato
 pub const SmallMap = struct {
     level: u8,
     size: u16,
+    free_idx_count: usize,
+    free_idx: [smallMapEntries]u16,
+    metadata: [smallMapEntries]u32,
     entries: [smallMapEntries]Entry,
 
     const This = @This();
 
-    const presentMask: u64 = 1 << 63;
-    const distanceMask: u64 = 0b1111 << 59;
-    const hashMask: u64 = (~(presentMask | distanceMask));
-    const maxDist: u64 = 15;
+    const presentMask: u32 = 1 << 31;
+    const distanceMask: u32 = 0b1111 << 27;
+    const idxMask: u32 = 0b1111111111 << 17;
+    const hashMask: u32 = (~(presentMask | distanceMask | idxMask));
+    const maxDist: u32 = 15;
 
     fn isMetaPresent(metadata: u64) bool {
         return metadata & presentMask == presentMask;
     }
 
-    fn distanceOfMeta(metadata: u64) u64 {
-        return (metadata & distanceMask) >> 59;
+    fn distanceOfMeta(metadata: u32) u32 {
+        return (metadata & distanceMask) >> 27;
     }
 
-    fn hashOfMeta(metadata: u64) u64 {
-        return metadata & hashMask;
+    fn hashOfMeta(metadata: u32) u64 {
+        return @intCast(metadata & hashMask);
     }
 
-    fn metaOfDistanceAndHash(hash: u64, distance: u64) u64 {
-        return (hash & hashMask) | (distance << 59) | presentMask;
+    fn metaOfHashDistanceIndex(hash: u64, distance: u32, idx: u32) u32 {
+        return @as(u32, @intCast(cutHash(hash))) | (distance << 27) | (idx << 17) | presentMask;
+    }
+
+    fn idxOfMeta(metadata: u32) usize {
+        return @intCast((metadata & idxMask) >> 17);
     }
 
     fn cutHash(hash: u64) u64 {
@@ -199,8 +206,12 @@ pub const SmallMap = struct {
 
     pub fn clear(this: *This, level: u8) void {
         for (0..smallMapEntries) |entry_i| {
-            this.entries[entry_i].metadata = 0;
+            this.metadata[entry_i] = 0;
         }
+        for (0..smallMapEntries) |i| {
+            this.free_idx[i] = @intCast(smallMapEntries - 1 - i);
+        }
+        this.free_idx_count = smallMapEntries;
         this.level = level;
         this.size = 0;
     }
@@ -211,6 +222,77 @@ pub const SmallMap = struct {
         Split,
     };
 
+    // leading zeroes = index
+    const shifts_clz_vec_a = @Vector(8, u32){ 31, 30, 29, 28, 27, 26, 25, 24 };
+    const shifts_clz_vec_b = @Vector(8, u32){ 23, 22, 21, 20, 19, 18, 17, 16 };
+    const clz_vec_a = @as(@Vector(8, u32), @splat(1)) << shifts_clz_vec_a;
+    const clz_vec_b = @as(@Vector(8, u32), @splat(1)) << shifts_clz_vec_b;
+
+    const hash_mask: @Vector(8, u32) = @splat(hashMask);
+    const zeroes: @Vector(8, u32) = @splat(0);
+
+    fn toClzIdxFast(this: *const This, hash: u64, comptime part: usize) u32 {
+        // a bit of SIMD to find the first indexes with a matching hash
+
+        const offset_start = if (part == 0) 0 else 8;
+        const clz_vec = if (part == 0) clz_vec_a else clz_vec_b;
+        const shifted_hash_vec: @Vector(8, u32) = @splat(@intCast(cutHash(hash)));
+
+        const starting_pos = hash % smallMapEntries + offset_start;
+
+        const meta_vec = if (starting_pos + 7 >= smallMapEntries) @Vector(8, u32){
+            this.metadata[(starting_pos + 0) % smallMapEntries],
+            this.metadata[(starting_pos + 1) % smallMapEntries],
+            this.metadata[(starting_pos + 2) % smallMapEntries],
+            this.metadata[(starting_pos + 3) % smallMapEntries],
+            this.metadata[(starting_pos + 4) % smallMapEntries],
+            this.metadata[(starting_pos + 5) % smallMapEntries],
+            this.metadata[(starting_pos + 6) % smallMapEntries],
+            this.metadata[(starting_pos + 7) % smallMapEntries],
+        } else @Vector(8, u32){
+            // fastpath no div (branch vs 8divs, but branch is ez to predict)
+            this.metadata[starting_pos + 0],
+            this.metadata[starting_pos + 1],
+            this.metadata[starting_pos + 2],
+            this.metadata[starting_pos + 3],
+            this.metadata[starting_pos + 4],
+            this.metadata[starting_pos + 5],
+            this.metadata[starting_pos + 6],
+            this.metadata[starting_pos + 7],
+        };
+        const hash_meta_vec = meta_vec & hash_mask;
+        const hash_eq = hash_meta_vec == shifted_hash_vec;
+        const clz_idxs = @select(u32, hash_eq, clz_vec, zeroes);
+        const idxes = @reduce(.Or, clz_idxs);
+        return idxes;
+    }
+
+    fn findIdxOf(this: *const This, shifted_hash: u64, key: *const string.String) ?usize {
+        const one: u32 = 1;
+        const starting_pos = shifted_hash % smallMapEntries;
+
+        var clz_access = this.toClzIdxFast(shifted_hash, 0);
+        while (clz_access != 0) {
+            const idx: u32 = @clz(clz_access); // get set bit
+            clz_access ^= (one << 31) >> @intCast(idx); // unset bit
+            const meta_idx = (starting_pos + idx) % smallMapEntries;
+            if (this.entries[idxOfMeta(this.metadata[meta_idx])].key.eql(key)) {
+                return meta_idx;
+            }
+        }
+
+        clz_access = this.toClzIdxFast(shifted_hash, 1);
+        while (clz_access != 0) {
+            const idx: u32 = @clz(clz_access); // get set bit
+            clz_access ^= (one << 31) >> @intCast(idx); // unset bit
+            const meta_idx = (starting_pos + idx) % smallMapEntries;
+            if (this.entries[idxOfMeta(this.metadata[meta_idx])].key.eql(key)) {
+                return meta_idx;
+            }
+        }
+        return null;
+    }
+
     // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
     // if Result.Split the key is owned by caller and nothing has been changed
     pub fn updateOrCreate(this: *This, hash: u64, key: string.String) Result {
@@ -218,17 +300,15 @@ pub const SmallMap = struct {
             // - smallMapEntries / 25 is a small buffer to avoid very long runs on insert
             return .Split;
         }
-
         const shifted_hash = hash >> @intCast(this.level);
 
-        const starting_pos = shifted_hash % smallMapEntries;
-        var pos = starting_pos;
-        var distance: u64 = 0;
+        if (this.findIdxOf(shifted_hash, &key)) |idx| {
+            return Result{ .Present = &this.entries[idxOfMeta(this.metadata[idx])].value };
+        }
 
-        while (isMetaPresent(this.entries[pos].metadata) and distanceOfMeta(this.entries[pos].metadata) >= distance and distance <= maxDist) {
-            if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(&key)) {
-                return Result{ .Present = &this.entries[pos].value };
-            }
+        var pos = shifted_hash % smallMapEntries;
+        var distance: u32 = 0;
+        while (isMetaPresent(this.metadata[pos]) and distanceOfMeta(this.metadata[pos]) >= distance and distance <= maxDist) {
             pos += 1;
             pos %= smallMapEntries;
             distance += 1;
@@ -238,24 +318,30 @@ pub const SmallMap = struct {
             return .Split;
         }
 
-        if (!isMetaPresent(this.entries[pos].metadata)) {
-            this.entries[pos].metadata = metaOfDistanceAndHash(shifted_hash, distance);
-            this.entries[pos].key = key;
+        if (!isMetaPresent(this.metadata[pos])) {
+            const insert_idx = this.free_idx[this.free_idx_count - 1];
+            this.free_idx_count -= 1;
+            this.metadata[pos] = metaOfHashDistanceIndex(
+                shifted_hash,
+                distance,
+                @intCast(insert_idx),
+            );
+            this.entries[insert_idx].key = key;
             this.size += 1;
-            return Result{ .Absent = &this.entries[pos].value };
+            return Result{ .Absent = &this.entries[insert_idx].value };
         }
 
         // shift all later entries.
         // We need to do it 2 times to prevent corruption and OOM.
 
         // first pass, test if insert is possible:
-        var prev_entry = this.entries[pos];
+        var prev_entry = this.metadata[pos];
         var shift_pos = pos;
-        while (isMetaPresent(prev_entry.metadata)) {
+        while (isMetaPresent(prev_entry)) {
             shift_pos += 1;
             shift_pos %= smallMapEntries;
 
-            const prev_distance = distanceOfMeta(prev_entry.metadata);
+            const prev_distance = distanceOfMeta(prev_entry);
             const new_distance = prev_distance + 1;
 
             if (new_distance > maxDist) {
@@ -263,31 +349,40 @@ pub const SmallMap = struct {
                 return .Split;
             }
 
-            prev_entry = this.entries[shift_pos];
+            prev_entry = this.metadata[shift_pos];
         }
 
         // second pass with the knowledge, that this insert can be completed;
-        prev_entry = this.entries[pos];
+        prev_entry = this.metadata[pos];
         shift_pos = pos;
 
-        this.entries[pos] = Entry{
-            .metadata = metaOfDistanceAndHash(shifted_hash, distance),
+        const insert_idx = this.free_idx[this.free_idx_count - 1];
+        this.free_idx_count -= 1;
+        this.metadata[pos] = metaOfHashDistanceIndex(
+            shifted_hash,
+            distance,
+            @intCast(insert_idx),
+        );
+        this.entries[@intCast(insert_idx)] = Entry{
             .key = key,
             .value = Value.nil(),
         };
 
-        const v_ptr = &this.entries[pos].value;
+        const v_ptr = &this.entries[@intCast(insert_idx)].value;
 
-        while (isMetaPresent(prev_entry.metadata)) {
+        while (isMetaPresent(prev_entry)) {
             shift_pos += 1;
             shift_pos %= smallMapEntries;
 
-            const prev_distance = distanceOfMeta(prev_entry.metadata);
+            const prev_distance = distanceOfMeta(prev_entry);
             const new_distance = prev_distance + 1;
 
-            const tmp = this.entries[shift_pos];
-            prev_entry.metadata = metaOfDistanceAndHash(hashOfMeta(prev_entry.metadata), new_distance);
-            this.entries[shift_pos] = prev_entry;
+            const tmp = this.metadata[shift_pos];
+            this.metadata[shift_pos] = metaOfHashDistanceIndex(
+                hashOfMeta(prev_entry),
+                new_distance,
+                @intCast(idxOfMeta(prev_entry)),
+            );
             prev_entry = tmp;
         }
 
@@ -297,56 +392,45 @@ pub const SmallMap = struct {
 
     pub fn get(this: *const This, hash: u64, key: *const string.String) ?*const Value {
         const shifted_hash = hash >> @intCast(this.level);
-        const starting_pos = shifted_hash % smallMapEntries;
-        var pos = starting_pos;
-        var distance: u64 = 0;
-        while (distance <= maxDist and
-            isMetaPresent(this.entries[pos].metadata) and
-            distanceOfMeta(this.entries[pos].metadata) >= distance and
-            !(hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)))
-        {
-            distance += 1;
-            pos += 1;
-            pos %= smallMapEntries;
-        }
-
-        if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)) {
-            return &this.entries[pos].value;
+        if (this.findIdxOf(shifted_hash, key)) |idx| {
+            return &this.entries[idxOfMeta(this.metadata[idx])].value;
         }
         return null;
     }
 
     pub fn delete(this: *This, hash: u64, key: *const string.String) ?Entry {
         const shifted_hash = hash >> @intCast(this.level);
-        const starting_pos = shifted_hash % smallMapEntries;
-        var pos = starting_pos;
-        var distance: u64 = 0;
-        while (distance <= maxDist and
-            isMetaPresent(this.entries[pos].metadata) and
-            distanceOfMeta(this.entries[pos].metadata) >= distance and
-            !(hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)))
-        {
-            distance += 1;
-            pos += 1;
-            pos %= smallMapEntries;
-        }
+        if (this.findIdxOf(shifted_hash, key)) |idx| {
+            const metadata = this.metadata[idx];
+            if (hashOfMeta(metadata) == cutHash(shifted_hash) and
+                this.entries[idxOfMeta(metadata)].key.eql(key))
+            {
+                const deleted = this.entries[idxOfMeta(metadata)];
 
-        if (hashOfMeta(this.entries[pos].metadata) == cutHash(shifted_hash) and this.entries[pos].key.eql(key)) {
-            const deleted = this.entries[pos];
+                var pos: usize = @intCast(idx);
+                while (true) {
+                    var prev_pos = pos;
+                    pos += 1;
+                    pos %= smallMapEntries;
+                    const pos_meta = this.metadata[pos];
+                    const pos_dist = distanceOfMeta(pos_meta);
 
-            while (true) {
-                var prev_pos = pos;
-                pos += 1;
-                pos %= smallMapEntries;
-                const pos_meta = this.entries[pos].metadata;
-                const pos_dist = distanceOfMeta(pos_meta);
-                if (!isMetaPresent(pos_meta) or pos_dist == 0) {
-                    this.entries[prev_pos].metadata = 0;
-                    this.size -= 1;
-                    return deleted;
+                    if (!isMetaPresent(pos_meta) or pos_dist == 0) {
+                        this.free_idx[this.free_idx_count] = @intCast(idxOfMeta(this.metadata[prev_pos]));
+                        this.free_idx_count += 1;
+
+                        this.metadata[prev_pos] = 0;
+                        this.size -= 1;
+                        return deleted;
+                    }
+
+                    this.metadata[prev_pos] = this.metadata[pos];
+                    this.metadata[prev_pos] = metaOfHashDistanceIndex(
+                        hashOfMeta(pos_meta),
+                        pos_dist - 1,
+                        @intCast(idxOfMeta(pos_meta)),
+                    );
                 }
-                this.entries[prev_pos] = this.entries[pos];
-                this.entries[prev_pos].metadata = metaOfDistanceAndHash(hashOfMeta(pos_meta), pos_dist - 1);
             }
         }
 
@@ -355,11 +439,13 @@ pub const SmallMap = struct {
 
     fn fillFromSplit(this: *This, data: *This, bit: u64) void {
         for (0..smallMapEntries) |i| {
-            if (isMetaPresent(data.entries[i].metadata) and
-                hashOfMeta(data.entries[i].metadata) & 1 == bit)
+            const meta = data.metadata[i];
+            if (isMetaPresent(meta) and
+                hashOfMeta(meta) & 1 == bit)
             {
-                switch (this.updateOrCreate(data.entries[i].key.hash(), data.entries[i].key)) {
-                    Result.Absent => |v| v.* = data.entries[i].value,
+                const idx = idxOfMeta(meta);
+                switch (this.updateOrCreate(data.entries[idx].key.hash(), data.entries[idx].key)) {
+                    Result.Absent => |v| v.* = data.entries[idx].value,
                     else => unreachable,
                 }
             }
@@ -817,6 +903,8 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
     }
 }.drive);
 
+const test_threadCount = 6;
+
 test "map.ExtendibleMap multi-single" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     var ga = try alloc.GlobalAllocator.init(50000, arena.allocator());
@@ -834,11 +922,10 @@ test "map.ExtendibleMap multi-single" {
 
     const TestQ = FixedSizedQueue(InsertAndSplitMachine, 100);
 
-    const threadCount = 16;
-    var threads: [threadCount]std.Thread = undefined;
+    var threads: [test_threadCount]std.Thread = undefined;
     var now = try std.time.Timer.start();
 
-    for (0..threadCount) |thread_num| {
+    for (0..test_threadCount) |thread_num| {
         threads[thread_num] = try std.Thread.spawn(.{}, struct {
             fn thread(galloc: *alloc.GlobalAllocator, worker_id: usize) void {
                 const offset = 100_000_000 * worker_id;
@@ -904,7 +991,7 @@ test "map.ExtendibleMap multi-single" {
     }
 
     const ms = now.lap() / std.time.ns_per_ms;
-    std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ threadCount, ms, 2_000_000 / ms });
+    std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ test_threadCount, ms, 2_000_000 / ms });
     arena.deinit();
 }
 
@@ -929,11 +1016,10 @@ test "map.ExtendibleMap multi" {
 
     const TestQ = FixedSizedQueue(InsertAndSplitMachine, 100);
 
-    const threadCount = 16;
-    var threads: [threadCount]std.Thread = undefined;
+    var threads: [test_threadCount]std.Thread = undefined;
     var now = try std.time.Timer.start();
 
-    for (0..threadCount) |thread_num| {
+    for (0..test_threadCount) |thread_num| {
         threads[thread_num] = try std.Thread.spawn(.{}, struct {
             fn thread(galloc: *alloc.GlobalAllocator, smap: *ExtendibleMap, worker_id: usize) void {
                 const offset = 100_000_000 * worker_id;
@@ -993,7 +1079,7 @@ test "map.ExtendibleMap multi" {
     }
 
     const ms = now.lap() / std.time.ns_per_ms;
-    std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ threadCount, ms, 2_000_000 / ms });
+    std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ test_threadCount, ms, 2_000_000 / ms });
     arena.deinit();
 }
 
@@ -1063,13 +1149,44 @@ test "map.ExtendibleMap single" {
     arena.deinit();
 }
 
+test "map.SmallMap split" {
+    const expect = std.testing.expect;
+
+    var i: usize = 0;
+    while (i < 1_000_000) {
+        var a: SmallMap = undefined;
+        a.clear(0);
+        const start = i;
+        while (true) : (i += 1) {
+            var k = string.String.fromInt(@intCast(i));
+            if (a.updateOrCreate(k.hash(), k) == SmallMap.Result.Split) {
+                break;
+            }
+        }
+        var b: SmallMap = undefined;
+        b.clear(1);
+        var c: SmallMap = undefined;
+        c.clear(1);
+        b.fillFromSplit(&a, 0);
+        c.fillFromSplit(&a, 1);
+
+        for (start..i) |check| {
+            var k = string.String.fromInt(@intCast(check));
+            expect(c.get(k.hash(), &k) != null or b.get(k.hash(), &k) != null) catch |err| {
+                std.debug.print("Missing key: {}, hash = {}\n", .{ check, k.hash() });
+                return err;
+            };
+        }
+    }
+}
+
 test "map.SmallMap.basic" {
     const expect = std.testing.expect;
 
     var a: SmallMap = undefined;
     a.clear(0);
 
-    for (0..100) |ui| {
+    for (0..300) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = k;
@@ -1079,7 +1196,7 @@ test "map.SmallMap.basic" {
         }
     }
 
-    for (0..100) |ui| {
+    for (0..300) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1093,7 +1210,7 @@ test "map.SmallMap.basic" {
         }
     }
 
-    for (0..100) |ui| {
+    for (0..300) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1102,7 +1219,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (0..50) |ui| {
+    for (0..150) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1111,7 +1228,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (0..50) |ui| {
+    for (0..150) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         if (a.get(k.hash(), &k)) |_| {
@@ -1119,7 +1236,7 @@ test "map.SmallMap.basic" {
         }
     }
 
-    for (50..100) |ui| {
+    for (150..300) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1128,7 +1245,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (50..100) |ui| {
+    for (150..300) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1137,7 +1254,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (50..100) |ui| {
+    for (150..300) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         if (a.get(k.hash(), &k)) |_| {
