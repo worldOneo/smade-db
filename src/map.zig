@@ -642,10 +642,14 @@ pub const ExtendibleMap = struct {
     // Null indicates OOM or OOS
     pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
         var tmp: SmallMap = small_map.*;
-        var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)) orelse return null;
+        var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)) orelse {
+            std.debug.print("OOM", .{});
+            return null;
+        };
         const next_level = small_map.level + 1;
 
         if (next_level > this.max_expansions + dict_level_zero) {
+            std.debug.print("OOS", .{});
             // we cant expand beyond this magic
             return null;
         }
@@ -709,6 +713,203 @@ const ExtendibleMapError = error{
     MapExpansionLimit,
 };
 
+pub fn FixedSizedQueue(comptime T: type, comptime Size: usize) type {
+    const RSize = Size + 1;
+    return struct {
+        values: [RSize]T,
+        read: usize,
+        write: usize,
+
+        const This = @This();
+        pub fn init() This {
+            var a: [RSize]T = undefined;
+            return This{ .values = a, .read = 0, .write = 0 };
+        }
+
+        fn push(this: *This, item: T) bool {
+            const next_idx = (this.write + 1) % RSize;
+            if (next_idx == this.read) {
+                return false;
+            }
+            this.values[this.write] = item;
+            this.write = next_idx;
+            return true;
+        }
+
+        fn pop(this: *This) ?T {
+            if (this.read == this.write) {
+                return null;
+            }
+            const current_idx = this.read;
+            this.read = (this.read + 1) % RSize;
+            return this.values[current_idx];
+        }
+
+        fn isFull(this: *This) bool {
+            const next_idx = (this.write + 1) % RSize;
+            return next_idx == this.read;
+        }
+    };
+}
+
+const InsertAndSplitState = struct {
+    pub fn init(key: string.String, map: *ExtendibleMap, lalloc: *alloc.LocalAllocator) @This() {
+        return .{
+            .key = key,
+            .map = map,
+            .allocator = lalloc,
+            .splitmachine = null,
+            .acquiremachine = null,
+        };
+    }
+
+    key: string.String,
+    map: *ExtendibleMap,
+    allocator: *alloc.LocalAllocator,
+    splitmachine: ?struct {
+        smallmap: *lock.OptLock(SmallMap),
+        machine: ExtendibleMap.SplitMachine,
+    },
+    acquiremachine: ?ExtendibleMap.AcquireMachine,
+};
+const InsertAndSplitResult = struct {
+    value: *Value,
+    acquired: ExtendibleMap.AcquireResult,
+};
+const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndSplitResult, struct {
+    const Drive = state.Drive(InsertAndSplitState, ?InsertAndSplitResult);
+    fn drive(c_s: InsertAndSplitState) Drive {
+        var s = c_s;
+        if (s.acquiremachine) |c_acquire| {
+            var acquire = c_acquire;
+            if (acquire.drive()) |acquired| {
+                switch (acquired.map.updateOrCreate(s.key.hash(), s.key)) {
+                    SmallMap.Result.Present => |ptr| return Drive{ .Complete = .{
+                        .value = ptr,
+                        .acquired = acquired,
+                    } },
+                    SmallMap.Result.Absent => |ptr| return Drive{ .Complete = .{
+                        .value = ptr,
+                        .acquired = acquired,
+                    } },
+                    SmallMap.Result.Split => {
+                        s.splitmachine = .{
+                            .smallmap = acquired.lock,
+                            .machine = s.map.split(s.key.hash(), acquired.map, s.allocator) orelse return Drive{ .Complete = null },
+                        };
+                        s.acquiremachine = null;
+                        return drive(s);
+                    },
+                }
+            } else {
+                s.acquiremachine = acquire;
+                return Drive{ .Incomplete = s };
+            }
+        } else if (s.splitmachine) |c_split| {
+            var split = c_split;
+            if (split.machine.drive()) |second| {
+                second.lock.unlock();
+                split.smallmap.unlock();
+                s.splitmachine = null;
+                return drive(s);
+            }
+            s.splitmachine = split;
+            return Drive{ .Incomplete = s };
+        } else {
+            s.acquiremachine = s.map.acquire(s.key.hash());
+            return drive(s);
+        }
+        unreachable;
+    }
+}.drive);
+
+test "map.ExtendibleMap multi" {
+    var ga = try alloc.GlobalAllocator.init(50000, std.heap.page_allocator);
+    var la = alloc.LocalAllocator.init(&ga);
+    var m: ExtendibleMap = undefined;
+
+    try m.setup(16, std.heap.page_allocator, &la);
+
+    const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
+        const Drive = state.Drive(string.String, bool);
+        pub fn drive(s: string.String, dep: *const SmallMap) Drive {
+            const value = dep.get(s.hash(), &s) orelse return Drive{ .Complete = false };
+            if (value.asConstString()) |str| {
+                return Drive{ .Complete = str.eql(&s) };
+            }
+            return Drive{ .Complete = false };
+        }
+    }.drive);
+
+    const TestQ = FixedSizedQueue(InsertAndSplitMachine, 100);
+
+    const threadCount = 16;
+    var threads: [threadCount]std.Thread = undefined;
+    var now = try std.time.Timer.start();
+
+    for (0..threadCount) |thread_num| {
+        threads[thread_num] = try std.Thread.spawn(.{}, struct {
+            fn thread(galloc: *alloc.GlobalAllocator, smap: *ExtendibleMap, worker_id: usize) void {
+                const offset = 100_000_000 * worker_id;
+                const changes: usize = 1_000_000;
+                var lalloc = alloc.LocalAllocator.init(galloc);
+                var q = TestQ.init();
+                const end = (changes + offset);
+                var location: usize = offset;
+
+                while (true) {
+                    var present = false;
+                    while (q.pop()) |machine| {
+                        var ins_spl_machine: InsertAndSplitMachine = machine;
+                        present = true;
+                        if (ins_spl_machine.drive()) |value| {
+                            var v = value orelse unreachable;
+                            v.value.* = Value.fromString(ins_spl_machine.state.key);
+                            v.acquired.lock.unlock();
+                        } else {
+                            _ = q.push(ins_spl_machine);
+                        }
+                    }
+                    while (!q.isFull() and location < end) {
+                        present = true;
+                        _ = q.push(InsertAndSplitMachine.init(InsertAndSplitState.init(
+                            string.String.fromInt(@intCast(location)),
+                            smap,
+                            &lalloc,
+                        )));
+                        location += 1;
+                    }
+                    if (!present) {
+                        break;
+                    }
+                }
+
+                for (offset..(changes + offset)) |i| {
+                    const k = string.String.fromInt(@intCast(i));
+                    var reader = smap.read(
+                        k.hash(),
+                        read_machine,
+                        state.TrivialCreator(read_machine),
+                        bool,
+                        state.trivialCreator(read_machine, read_machine.init(k)),
+                    );
+                    std.testing.expect(reader.run()) catch {
+                        std.debug.print("A nice crash by {} missing {}\n", .{ worker_id, i });
+                        return;
+                    };
+                }
+            }
+        }.thread, .{ &ga, &m, thread_num });
+    }
+
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    const ms = now.lap() / std.time.ns_per_ms;
+    std.debug.print("2Mops*{}Threads writes+reads in {}ms = {} ops/core/ms\n", .{ threadCount, ms, 2_000_000 / ms });
+}
+
 test "map.ExtendibleMap single" {
     var ga = try alloc.GlobalAllocator.init(10000, std.heap.page_allocator);
     var la = alloc.LocalAllocator.init(&ga);
@@ -743,7 +944,8 @@ test "map.ExtendibleMap single" {
         }
     }
 
-    std.debug.print("1Mops writes in {}ms\n", .{now.lap() / std.time.ns_per_ms});
+    const write_lap_time = now.lap();
+    std.debug.print("1Mops writes in {}ms = {} ops / ms\n", .{ write_lap_time / std.time.ns_per_ms, 1_000_000 / (write_lap_time / std.time.ns_per_ms) });
 
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
         const Drive = state.Drive(string.String, bool);
@@ -770,12 +972,8 @@ test "map.ExtendibleMap single" {
         try expect(reader.run());
     }
 
-    std.debug.print("1Mops reads in {}ms\n", .{now.lap() / std.time.ns_per_ms});
-
-    for (0..1_000_000) |i| {
-        _ = string.String.fromInt(@intCast(i));
-    }
-    std.debug.print("1Mops fromInt in {}ms\n", .{now.lap() / std.time.ns_per_ms});
+    const read_lap_time = now.lap();
+    std.debug.print("1Mops reads in {}ms = {} ops/ms\n", .{ read_lap_time / std.time.ns_per_ms, 1_000_000 / (read_lap_time / std.time.ns_per_ms) });
 }
 
 test "map.SmallMap.basic" {
