@@ -2,7 +2,7 @@ const std = @import("std");
 const string = @import("string.zig");
 const alloc = @import("alloc.zig");
 
-const RespList = struct {
+pub const RespList = struct {
     length: usize,
     data: []RespValue,
 
@@ -104,7 +104,7 @@ const RespInt = struct {
     }
 };
 
-const RespValue = struct {
+pub const RespValue = struct {
     const Flag = enum(usize) {
         Int,
         String,

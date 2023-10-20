@@ -9,36 +9,56 @@ pub fn LockReadState(comptime T: type, comptime DepMachine: type, comptime Creat
                 creator: Creator,
             },
             DriveState: struct { machine: DepMachine, lock: *OptLock(T), creator: Creator, read: OptLock(T).Read },
-            Verify: struct { read: OptLock(T).Read, lock: *OptLock(T), creator: Creator, result: Result },
+            Verify: struct {
+                machine: DepMachine,
+                lock: *OptLock(T),
+                creator: Creator,
+                read: OptLock(T).Read,
+                result: Result,
+            },
         };
         const This = @This();
-        const Drive = state.Drive(This.State, Result);
+        const Drive = state.Drive(Result);
         state: This.State,
-        pub fn drive(self: This.State) Drive {
-            switch (self) {
-                This.State.Read => |v| {
+        pub fn drive(self: *This.State) Drive {
+            switch (self.*) {
+                .Read => |*v| {
                     if (v.lock.startRead()) |read| {
                         var creator = v.creator;
                         const new = creator.new();
-                        return drive(This.State{ .DriveState = .{ .creator = creator, .lock = v.lock, .read = read, .machine = new } });
+                        self.* = This.State{ .DriveState = .{
+                            .creator = creator,
+                            .lock = v.lock,
+                            .read = read,
+                            .machine = new,
+                        } };
+                        return drive(self);
                     }
-                    return Drive{ .Incomplete = self };
+                    return .Incomplete;
                 },
-                This.State.DriveState => |v| {
-                    var machine = v.machine;
+                .DriveState => |*v| {
                     const dep: *const T = &v.lock.value;
-                    const res = machine.drive(dep);
+                    const res = v.machine.drive(dep);
                     switch (res) {
-                        @TypeOf(res).Incomplete => |ms| {
-                            machine.state = ms;
-                            return Drive{ .Incomplete = This.State{ .DriveState = .{ .creator = v.creator, .lock = v.lock, .read = v.read, .machine = machine } } };
+                        @TypeOf(res).Incomplete => return .Incomplete,
+                        @TypeOf(res).Complete => |ms| {
+                            self.* = This.State{ .Verify = .{
+                                .creator = v.creator,
+                                .lock = v.lock,
+                                .read = v.read,
+                                .result = ms,
+                                .machine = v.machine,
+                            } };
+                            return drive(self);
                         },
-                        @TypeOf(res).Complete => |ms| return drive(This.State{ .Verify = .{ .creator = v.creator, .lock = v.lock, .read = v.read, .result = ms } }),
                     }
                 },
-                This.State.Verify => |v| {
+                .Verify => |*v| {
                     if (!v.lock.verifyRead(v.read)) {
-                        return Drive{ .Incomplete = This.State{ .Read = .{ .creator = v.creator, .lock = v.lock } } };
+                        var creator = &v.creator;
+                        creator.invalidate(v.machine);
+                        self.* = This.State{ .Read = .{ .creator = v.creator, .lock = v.lock } };
+                        return .Incomplete;
                     } else {
                         return Drive{ .Complete = v.result };
                     }
@@ -63,31 +83,32 @@ pub fn LockWriteState(comptime T: type, comptime DepMachine: type, comptime Crea
             Release: struct { lock: *OptLock(T), creator: Creator, result: Result },
         };
         const This = @This();
-        const Drive = state.Drive(This.State, Result);
+        const Drive = state.Drive(Result);
         state: This.State,
-        pub fn drive(self: This.State) Drive {
-            switch (self) {
-                This.State.Acquire => |v| {
+        pub fn drive(self: *This.State) Drive {
+            switch (self.*) {
+                .Acquire => |*v| {
                     if (v.lock.tryLock()) |_| {
-                        return Drive{ .Incomplete = self };
+                        return .Incomplete;
                     }
 
-                    var creator = v.creator;
-                    const new = creator.new();
-                    return drive(This.State{ .DriveState = .{ .creator = creator, .lock = v.lock, .machine = new } });
+                    const new = v.creator.new();
+                    self.* = This.State{ .DriveState = .{ .creator = v.creator, .lock = v.lock, .machine = new } };
+                    return drive(self);
                 },
-                This.State.DriveState => |v| {
-                    var machine = v.machine;
+                .DriveState => |*v| {
+                    var machine = &v.machine;
                     const res = machine.drive(&v.lock.value);
                     switch (res) {
-                        @TypeOf(res).Incomplete => |ms| {
-                            machine.state = ms;
-                            return Drive{ .Incomplete = This.State{ .DriveState = .{ .creator = v.creator, .lock = v.lock, .machine = machine } } };
+                        @TypeOf(res).Incomplete => return .Incomplete,
+                        @TypeOf(res).Complete => |ms| {
+                            v.creator.invalidate(v.machine);
+                            self.* = This.State{ .Release = .{ .creator = v.creator, .lock = v.lock, .result = ms } };
+                            return drive(self);
                         },
-                        @TypeOf(res).Complete => |ms| return drive(This.State{ .Release = .{ .creator = v.creator, .lock = v.lock, .result = ms } }),
                     }
                 },
-                This.State.Release => |v| {
+                .Release => |*v| {
                     v.lock.unlock();
                     return Drive{ .Complete = v.result };
                 },

@@ -180,9 +180,9 @@ pub const String = struct {
         return std.hash_map.hashString(this.sliceView());
     }
 
-    pub fn clone(this: *const This, allocator: *alloc.LocalAllocator) This {
+    pub fn clone(this: *const This, allocator: *alloc.LocalAllocator) ?This {
         var new = empty();
-        new.append(this.sliceView(), allocator);
+        new.append(this.sliceView(), allocator) orelse return null;
         return new;
     }
 };

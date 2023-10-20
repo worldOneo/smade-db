@@ -74,6 +74,12 @@ const List = struct {
         return null;
     }
 
+    pub fn deinit(this: *This, la: *alloc.LocalAllocator) void {
+        while (this.lpop()) |v| {
+            la.free(Node, v);
+        }
+    }
+
     pub fn len(this: *This) usize {
         return this.length;
     }
@@ -92,12 +98,12 @@ pub const Value = struct {
         return value;
     }
 
-    fn tag(this: *This) ValueTag {
+    pub fn tag(this: *const This) ValueTag {
         var sms: *const [24]u8 = @ptrCast(this);
         return @enumFromInt(sms[23] & 0b11);
     }
 
-    fn complexTag(this: *This) ?ComplexValueTag {
+    fn complexTag(this: *const This) ?ComplexValueTag {
         if (this.tag() == ValueTag.Complex) {
             var sms: *const [24]u8 = @ptrCast(this);
             return @enumFromInt((sms[23] >> 2) & 0b11);
@@ -105,7 +111,7 @@ pub const Value = struct {
         return null;
     }
 
-    pub fn isPresent(this: *This) bool {
+    pub fn isPresent(this: *const This) bool {
         if (this.complexTag()) |complex_tag| {
             return complex_tag != ComplexValueTag.Nil;
         }
@@ -151,6 +157,14 @@ pub const Value = struct {
             return null;
         }
         return @ptrCast(this);
+    }
+
+    pub fn deinit(this: *This, la: *alloc.LocalAllocator) void {
+        if (this.asList()) |list| {
+            list.deinit(la);
+        } else if (this.asString()) |str| {
+            str.deinit(la);
+        }
     }
 };
 
@@ -491,8 +505,8 @@ pub const ExtendibleMap = struct {
     };
 
     pub const AcquireMachine = state.Machine(AcquireState, AcquireResult, struct {
-        const Drive = state.Drive(AcquireState, AcquireResult);
-        fn drive(s: AcquireState) Drive {
+        const Drive = state.Drive(AcquireResult);
+        fn drive(s: *AcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
             var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
@@ -506,11 +520,11 @@ pub const ExtendibleMap = struct {
 
                 if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
                     map_lock.unlock();
-                    return Drive{ .Incomplete = s };
+                    return .Incomplete;
                 }
                 return Drive{ .Complete = .{ .map = map, .lock = map_lock } };
             }
-            return Drive{ .Incomplete = s };
+            return .Incomplete;
         }
     }.drive);
 
@@ -542,12 +556,10 @@ pub const ExtendibleMap = struct {
     pub fn ReadMachine(comptime DepMachine: type, comptime Creator: type, comptime Result: type) type {
         const State = ReadState(DepMachine, Creator);
         return state.Machine(State, Result, struct {
-            const Drive = state.Drive(State, Result);
-            pub fn drive(s: State) Drive {
-                switch (s) {
-                    State.Preparing => |const_prep| {
-                        var prep = const_prep;
-
+            const Drive = state.Drive(Result);
+            pub fn drive(s: *State) Drive {
+                switch (s.*) {
+                    .Preparing => |*prep| {
                         var read_dict: *Dict = prep.this.dict.load(std.atomic.Ordering.Acquire);
                         const idx = currentIdx(read_dict, prep.hash);
 
@@ -572,10 +584,10 @@ pub const ExtendibleMap = struct {
                                 new_read_dict != read_dict or
                                 map_lock != read_dict.segments[idx].load(std.atomic.Ordering.Monotonic))
                             {
-                                return Drive{ .Incomplete = s };
+                                return .Incomplete;
                             }
 
-                            return drive(State{
+                            s.* = State{
                                 .Driving = .{
                                     .hash = prep.hash,
                                     .this = prep.this,
@@ -584,37 +596,29 @@ pub const ExtendibleMap = struct {
                                     .machine = prep.creator.new(),
                                     .lock = map_lock,
                                 },
-                            });
+                            };
+                            return drive(s);
                         }
-                        return Drive{ .Incomplete = s };
+                        return .Incomplete;
                     },
-                    State.Driving => |const_driving| {
-                        var driving = const_driving;
+                    .Driving => |*driving| {
                         if (driving.machine.step_drive(driving.read.data)) |result| {
                             if (driving.lock.verifyRead(driving.read)) {
                                 return Drive{ .Complete = result };
                             } else {
                                 // TODO: Benchmark greedy retries
-                                return Drive{ .Incomplete = State{
+                                driving.creator.invalidate(driving.machine);
+                                s.* = State{
                                     .Preparing = .{
                                         .hash = driving.hash,
                                         .this = driving.this,
                                         .creator = driving.creator,
                                     },
-                                } };
+                                };
+                                return .Incomplete;
                             }
                         }
-
-                        return Drive{ .Incomplete = State{
-                            .Driving = .{
-                                .hash = driving.hash,
-                                .this = driving.this,
-                                .creator = driving.creator,
-                                .read = driving.read,
-                                .machine = driving.machine,
-                                .lock = driving.lock,
-                            },
-                        } };
+                        return .Incomplete;
                     },
                 }
             }
@@ -640,15 +644,15 @@ pub const ExtendibleMap = struct {
     const dict_level_zero = 4;
 
     pub const SplitMachine = state.Machine(SplitState, AcquireResult, struct {
-        const Drive = state.Drive(SplitState, AcquireResult);
-        pub fn drive(s: SplitState) Drive {
+        const Drive = state.Drive(AcquireResult);
+        pub fn drive(s: *SplitState) Drive {
             const one: u64 = 1;
             var now: *Dict = s.this.dict.load(std.atomic.Ordering.Monotonic);
 
             if (!now.copied) {
                 // do better things with our time than wait for a copie.
                 // maybe we can bake some cake... :)
-                return Drive{ .Incomplete = s };
+                return .Incomplete;
             }
 
             // test if the smallmap would fit into the dict
@@ -689,13 +693,13 @@ pub const ExtendibleMap = struct {
                         } else {
                             // someone else is expanding, well wait...
                             s.this.expansion_ptrs[next_idx].unlock();
-                            return Drive{ .Incomplete = s };
+                            return .Incomplete;
                         }
                     }
                     s.this.expansion_ptrs[next_idx].unlock();
                 } else {
                     // we need an expansion but someone else is currently expanding or something...
-                    return Drive{ .Incomplete = s };
+                    return .Incomplete;
                 }
             }
 
@@ -716,7 +720,7 @@ pub const ExtendibleMap = struct {
             const then = s.this.dict.load(std.atomic.Ordering.Monotonic);
             if (now != then) {
                 // retry this operation for the full dict
-                return Drive{ .Incomplete = s };
+                return .Incomplete;
             }
             return Drive{ .Complete = .{
                 .lock = s.with,
@@ -853,22 +857,23 @@ pub const InsertAndSplitState = struct {
     acquiremachine: ?ExtendibleMap.AcquireMachine,
 };
 pub const InsertAndSplitResult = struct {
+    present: bool,
     value: *Value,
     acquired: ExtendibleMap.AcquireResult,
 };
 pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndSplitResult, struct {
-    const Drive = state.Drive(InsertAndSplitState, ?InsertAndSplitResult);
-    fn drive(c_s: InsertAndSplitState) Drive {
-        var s = c_s;
-        if (s.acquiremachine) |c_acquire| {
-            var acquire = c_acquire;
+    const Drive = state.Drive(?InsertAndSplitResult);
+    fn drive(s: *InsertAndSplitState) Drive {
+        if (s.acquiremachine) |*acquire| {
             if (acquire.drive()) |acquired| {
                 switch (acquired.map.updateOrCreate(s.key.hash(), s.key)) {
                     SmallMap.Result.Present => |ptr| return Drive{ .Complete = .{
+                        .present = true,
                         .value = ptr,
                         .acquired = acquired,
                     } },
                     SmallMap.Result.Absent => |ptr| return Drive{ .Complete = .{
+                        .present = false,
                         .value = ptr,
                         .acquired = acquired,
                     } },
@@ -881,20 +886,16 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
                         return drive(s);
                     },
                 }
-            } else {
-                s.acquiremachine = acquire;
-                return Drive{ .Incomplete = s };
             }
-        } else if (s.splitmachine) |c_split| {
-            var split = c_split;
+            return .Incomplete;
+        } else if (s.splitmachine) |*split| {
             if (split.machine.drive()) |second| {
                 second.lock.unlock();
                 split.smallmap.unlock();
                 s.splitmachine = null;
                 return drive(s);
             }
-            s.splitmachine = split;
-            return Drive{ .Incomplete = s };
+            return .Incomplete;
         } else {
             s.acquiremachine = s.map.acquire(s.key.hash());
             return drive(s);
@@ -910,11 +911,11 @@ test "map.ExtendibleMap multi-single" {
     var ga = try alloc.GlobalAllocator.init(50000, arena.allocator());
 
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
-        const Drive = state.Drive(string.String, bool);
-        pub fn drive(s: string.String, dep: *const SmallMap) Drive {
-            const value = dep.get(s.hash(), &s) orelse return Drive{ .Complete = false };
+        const Drive = state.Drive(bool);
+        pub fn drive(s: *string.String, dep: *const SmallMap) Drive {
+            const value = dep.get(s.hash(), s) orelse return Drive{ .Complete = false };
             if (value.asConstString()) |str| {
-                return Drive{ .Complete = str.eql(&s) };
+                return Drive{ .Complete = str.eql(s) };
             }
             return Drive{ .Complete = false };
         }
@@ -1004,11 +1005,11 @@ test "map.ExtendibleMap multi" {
     try m.setup(16, std.heap.page_allocator, &la);
 
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
-        const Drive = state.Drive(string.String, bool);
-        pub fn drive(s: string.String, dep: *const SmallMap) Drive {
-            const value = dep.get(s.hash(), &s) orelse return Drive{ .Complete = false };
+        const Drive = state.Drive(bool);
+        pub fn drive(s: *string.String, dep: *const SmallMap) Drive {
+            const value = dep.get(s.hash(), s) orelse return Drive{ .Complete = false };
             if (value.asConstString()) |str| {
-                return Drive{ .Complete = str.eql(&s) };
+                return Drive{ .Complete = str.eql(s) };
             }
             return Drive{ .Complete = false };
         }
@@ -1120,11 +1121,11 @@ test "map.ExtendibleMap single" {
     std.debug.print("1Mops writes in {}ms = {} ops / ms\n", .{ write_lap_time / std.time.ns_per_ms, 1_000_000 / (write_lap_time / std.time.ns_per_ms) });
 
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
-        const Drive = state.Drive(string.String, bool);
-        pub fn drive(s: string.String, dep: *const SmallMap) Drive {
-            const value = dep.get(s.hash(), &s) orelse return Drive{ .Complete = false };
+        const Drive = state.Drive(bool);
+        pub fn drive(s: *string.String, dep: *const SmallMap) Drive {
+            const value = dep.get(s.hash(), s) orelse return Drive{ .Complete = false };
             if (value.asConstString()) |str| {
-                return Drive{ .Complete = str.eql(&s) };
+                return Drive{ .Complete = str.eql(s) };
             }
             return Drive{ .Complete = false };
         }
