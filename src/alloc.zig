@@ -92,7 +92,7 @@ const Page = struct {
             return @ptrCast(@alignCast(alloc));
         }
         if (this.bump_idx + size <= bytesInPage) {
-            allocLog("thread {} allocating size {} for page {*} from bump\n", .{ std.Thread.getCurrentId(), size, this });
+            allocLog("thread {} allocating size {} for page {*} from bump: {}\n", .{ std.Thread.getCurrentId(), size, this, @intFromPtr(&this.data) + this.bump_idx });
             var alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
             this.bump_idx += size;
             return @ptrCast(@alignCast(alloc));
@@ -431,7 +431,7 @@ pub const LocalAllocator = struct {
     pub fn allocateSlice(this: *This, comptime T: type, n: usize) ?[]T {
         const size = roundToClassSize(@sizeOf(T) * n);
         const class = sizeClassOf(size);
-        const ptr = this.class_pages[class].allocateSized(T, class).?;
+        const ptr = this.class_pages[class].allocateSized(T, size).?;
         const slice: [*]T = @ptrCast(ptr);
         return slice[0..size];
     }

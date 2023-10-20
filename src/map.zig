@@ -141,7 +141,7 @@ pub const Value = struct {
         return null;
     }
 
-    pub fn asCOnstList(this: *const This) ?*const List {
+    pub fn asConstList(this: *const This) ?*const List {
         return constCast(List, asList)(this);
     }
 
