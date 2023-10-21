@@ -2,7 +2,21 @@ pub fn Drive(comptime Result: type) type {
     return union(enum) { Incomplete, Complete: Result };
 }
 
-pub fn Machine(comptime State: type, comptime Result: type, comptime driver: fn (*State) Drive(Result)) type {
+pub fn Machine(comptime State: type, comptime Result: type, comptime driver: type) type {
+    if (!@hasDecl(driver, "drive")) {
+        @compileError("state.Machine requires driver to have 'drive' function");
+    }
+    if (@TypeOf(driver.drive) != fn (*State) Drive(Result)) {
+        @compileError("state.Machine requires driver.drive to be of type '" ++ @typeName(fn (*State) Drive(Result)) ++ "' found " ++ @typeName(@TypeOf(driver.drive)));
+    }
+    const drive_fn: fn (*State) Drive(Result) = driver.drive;
+    if (@hasDecl(driver, "deinit")) {
+        if (@TypeOf(driver.deinit) != fn (*State) void) {
+            @compileError("state.Machine requires driver.deinit to be of type " ++ @typeName(fn (*State) void));
+        }
+    }
+    const deinit_fn: ?fn (*State) void = if (@hasDecl(driver, "deinit")) driver.deinit else null;
+
     return struct {
         const This = @This();
         state: State,
@@ -16,7 +30,7 @@ pub fn Machine(comptime State: type, comptime Result: type, comptime driver: fn 
         pub fn run(this: *This) Result {
             var t = this;
             while (true) {
-                const result = driver(&t.state);
+                const result = drive_fn(&t.state);
                 switch (result) {
                     Drive(Result).Complete => |value| return value,
                     Drive(Result).Incomplete => {},
@@ -25,20 +39,41 @@ pub fn Machine(comptime State: type, comptime Result: type, comptime driver: fn 
         }
 
         pub fn drive(this: *This) ?Result {
-            const result = driver(&this.state);
+            const result = drive_fn(&this.state);
             switch (result) {
                 Drive(Result).Complete => |value| return value,
                 Drive(Result).Incomplete => return null,
+            }
+        }
+
+        pub fn deinit(this: *This) void {
+            if (deinit_fn) |f| {
+                f(&this.state);
             }
         }
     };
 }
 
 fn DepDriverState(comptime State: type, comptime Result: type, comptime Dep: type) type {
-    return struct { f: *const fn (*State, Dep) Drive(Result), d: Dep, s: State };
+    _ = Result;
+    return struct { d: Dep, s: State };
 }
 
-pub fn DepMachine(comptime State: type, comptime Result: type, comptime Dep: type, comptime driver: fn (*State, Dep) Drive(Result)) type {
+pub fn DepMachine(comptime State: type, comptime Result: type, comptime Dep: type, comptime driver: type) type {
+    if (!@hasDecl(driver, "drive")) {
+        @compileError("state.Machine requires driver to have 'drive' function");
+    }
+    if (@TypeOf(driver.drive) != fn (*State, Dep) Drive(Result)) {
+        @compileError("state.Machine requires driver.drive to be of type '" ++ @typeName(fn (*State, Dep) Drive(Result)) ++ "' found " ++ @typeName(@TypeOf(driver.drive)));
+    }
+    const drive_fn: fn (*State, Dep) Drive(Result) = driver.drive;
+    if (@hasDecl(driver, "deinit")) {
+        if (@TypeOf(driver.deinit) != fn (*State) void) {
+            @compileError("state.Machine requires driver.deinit to be of type " ++ @typeName(fn (*State) void));
+        }
+    }
+    const deinit_fn: ?fn (*State) void = if (@hasDecl(driver, "deinit")) driver.deinit else null;
+
     return struct {
         const This = @This();
 
@@ -48,19 +83,27 @@ pub fn DepMachine(comptime State: type, comptime Result: type, comptime Dep: typ
             return This{ .state = state };
         }
 
-        fn dep_drive(state: *DepDriverState(State, Result, Dep)) Drive(Result) {
-            const D = Drive(Result);
-            const s = state.f(&state.s, state.d);
-            return switch (s) {
-                Drive(Result).Incomplete => .Incomplete,
-                Drive(Result).Complete => |r| D{ .Complete = r },
-            };
-        }
-        const BoundMachine = Machine(DepDriverState(State, Result, Dep), Result, This.dep_drive);
+        const DepDriver = struct {
+            const ddstate = DepDriverState(State, Result, Dep);
+            fn drive(state: *ddstate) Drive(Result) {
+                const D = Drive(Result);
+                const s = drive_fn(&state.s, state.d);
+                return switch (s) {
+                    Drive(Result).Incomplete => .Incomplete,
+                    Drive(Result).Complete => |r| D{ .Complete = r },
+                };
+            }
+
+            fn deinit(this: *ddstate) void {
+                if (deinit_fn) |f| {
+                    f(this.s);
+                }
+            }
+        };
+        const BoundMachine = Machine(DepDriverState(State, Result, Dep), Result, This.DepDriver);
 
         pub fn bind(this: *This, dep: Dep) BoundMachine {
             return BoundMachine.init(.{
-                .f = driver,
                 .d = dep,
                 .s = this.state,
             });
@@ -77,7 +120,13 @@ pub fn DepMachine(comptime State: type, comptime Result: type, comptime Dep: typ
         }
 
         pub fn drive(this: *This, dep: Dep) Drive(Result) {
-            return driver(&this.state, dep);
+            return drive_fn(&this.state, dep);
+        }
+
+        pub fn deinit(this: *This) void {
+            if (deinit_fn) |f| {
+                f(&this.state);
+            }
         }
 
         pub fn step_drive(this: *This, dep: Dep) ?Result {
@@ -111,26 +160,26 @@ pub fn Creator(comptime Result: type, comptime State: type, comptime Fn: fn (*St
     };
 }
 
-pub fn trivialMachine_fn(comptime Result: type, comptime func: fn () Result) fn (*void) Drive(Result) {
+pub fn trivialMachine_fn(comptime Result: type, comptime func: fn () Result) type {
     return struct {
-        pub fn f(state: *void) Drive(Result) {
+        pub fn drive(state: *void) Drive(Result) {
             _ = state;
             return Drive(Result){ .Complete = func() };
         }
-    }.f;
+    };
 }
 
 pub fn trivialMachine(comptime Result: type, comptime Fn: fn () Result) Machine(void, Result, trivialMachine_fn(Result, Fn)) {
     return Machine(void, Result, trivialMachine_fn(Result, Fn)).init({});
 }
 
-pub fn trivialDepMachine_fn(comptime Result: type, comptime Dep: type, comptime func: fn (dep: Dep) Result) fn (*void, Dep) Drive(Result) {
+pub fn trivialDepMachine_fn(comptime Result: type, comptime Dep: type, comptime func: fn (dep: Dep) Result) type {
     return struct {
-        pub fn f(state: *void, dep: Dep) Drive(Result) {
+        pub fn drive(state: *void, dep: Dep) Drive(Result) {
             _ = state;
             return Drive(Result){ .Complete = func(dep) };
         }
-    }.f;
+    };
 }
 
 pub fn TrivialDepMachine(comptime Dep: type, comptime Result: type, comptime Fn: fn (Dep) Result) type {
@@ -160,38 +209,39 @@ pub fn trivialCreator(comptime Type: type, value: Type) TrivialCreator(Type) {
 }
 
 const std = @import("std");
-fn countdown_drive(count: *i32) Drive(i32) {
-    const D = Drive(i32);
-    if (count.* > 0) {
-        count.* -= 1;
-        return .Incomplete;
-    } else {
-        return D{ .Complete = 0 };
-    }
-}
 
-test "countdown machine" {
-    var countdown_machine = Machine(i32, i32, countdown_drive).init(10);
+test "state.Machine countdown machine" {
+    var countdown_machine = Machine(i32, i32, struct {
+        fn drive(count: *i32) Drive(i32) {
+            const D = Drive(i32);
+            if (count.* > 0) {
+                count.* -= 1;
+                return .Incomplete;
+            } else {
+                return D{ .Complete = 0 };
+            }
+        }
+    }).init(10);
     _ = countdown_machine.run();
 }
 
-fn bind_drive(a: *i32, b: i32) Drive(i32) {
-    const D = Drive(i32);
-    if (a.* == 128) {
-        return D{ .Complete = a.* };
-    }
-    a.* *= b;
-    return .Incomplete;
-}
-
 const expect = std.testing.expect;
-test "bind machine" {
-    var bind_machine = DepMachine(i32, i32, i32, bind_drive).init(2);
+test "state.DepMachine bind machine" {
+    var bind_machine = DepMachine(i32, i32, i32, struct {
+        fn drive(a: *i32, b: i32) Drive(i32) {
+            const D = Drive(i32);
+            if (a.* == 128) {
+                return D{ .Complete = a.* };
+            }
+            a.* *= b;
+            return .Incomplete;
+        }
+    }).init(2);
     var machine = bind_machine.bind(2);
     try expect(machine.run() == 128);
 }
 
-test "creator" {
+test "state.Creator creator" {
     var creator = Creator(i32, i32, struct {
         fn drive(state: *i32) i32 {
             state.* += 1;
@@ -206,7 +256,7 @@ test "creator" {
     try expect(creator.new() == 4);
 }
 
-test "trivial machine" {
+test "state.Machine trivial machine" {
     var machine = trivialMachine(i32, struct {
         fn drive() i32 {
             return 2;
@@ -215,7 +265,7 @@ test "trivial machine" {
     try expect(machine.run() == 2);
 }
 
-test "trivial dep machine" {
+test "state.DepMachine trivial dep machine" {
     var machine = trivialDepMachine(i32, i32, struct {
         fn drive(dep: i32) i32 {
             return dep + 2;
@@ -223,4 +273,18 @@ test "trivial dep machine" {
     }.drive);
     try expect(machine.run(2) == 4);
     try expect(machine.run(5) == 7);
+}
+
+test "state.Machine deinit" {
+    var machine = Machine(i32, i32, struct {
+        fn drive(_: *i32) Drive(i32) {
+            return .Incomplete;
+        }
+
+        fn deinit(s: *i32) void {
+            s.* += 1;
+        }
+    }).init(0);
+    machine.deinit();
+    try expect(machine.state == 1);
 }

@@ -506,7 +506,7 @@ pub const ExtendibleMap = struct {
 
     pub const AcquireMachine = state.Machine(AcquireState, AcquireResult, struct {
         const Drive = state.Drive(AcquireResult);
-        fn drive(s: *AcquireState) Drive {
+        pub fn drive(s: *AcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
             var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
@@ -526,7 +526,7 @@ pub const ExtendibleMap = struct {
             }
             return .Incomplete;
         }
-    }.drive);
+    });
 
     pub fn acquire(this: *This, hash: u64) AcquireMachine {
         return AcquireMachine.init(AcquireState{
@@ -604,6 +604,7 @@ pub const ExtendibleMap = struct {
                     .Driving => |*driving| {
                         if (driving.machine.step_drive(driving.read.data)) |result| {
                             if (driving.lock.verifyRead(driving.read)) {
+                                driving.machine.deinit();
                                 return Drive{ .Complete = result };
                             } else {
                                 // TODO: Benchmark greedy retries
@@ -622,7 +623,7 @@ pub const ExtendibleMap = struct {
                     },
                 }
             }
-        }.drive);
+        });
     }
 
     pub fn read(this: *This, hash: u64, comptime DepMachine: type, comptime Creator: type, comptime Result: type, creator: Creator) ReadMachine(DepMachine, Creator, Result) {
@@ -727,7 +728,7 @@ pub const ExtendibleMap = struct {
                 .map = &s.with.value,
             } };
         }
-    }.drive);
+    });
 
     // Null indicates OOM or OOS
     pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
@@ -856,14 +857,16 @@ pub const InsertAndSplitState = struct {
     },
     acquiremachine: ?ExtendibleMap.AcquireMachine,
 };
+
 pub const InsertAndSplitResult = struct {
     present: bool,
     value: *Value,
     acquired: ExtendibleMap.AcquireResult,
 };
+
 pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndSplitResult, struct {
     const Drive = state.Drive(?InsertAndSplitResult);
-    fn drive(s: *InsertAndSplitState) Drive {
+    pub fn drive(s: *InsertAndSplitState) Drive {
         if (s.acquiremachine) |*acquire| {
             if (acquire.drive()) |acquired| {
                 switch (acquired.map.updateOrCreate(s.key.hash(), s.key)) {
@@ -902,7 +905,7 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
         }
         unreachable;
     }
-}.drive);
+});
 
 const test_threadCount = 6;
 
@@ -919,7 +922,7 @@ test "map.ExtendibleMap multi-single" {
             }
             return Drive{ .Complete = false };
         }
-    }.drive);
+    });
 
     const TestQ = FixedSizedQueue(InsertAndSplitMachine, 100);
 
@@ -1013,7 +1016,7 @@ test "map.ExtendibleMap multi" {
             }
             return Drive{ .Complete = false };
         }
-    }.drive);
+    });
 
     const TestQ = FixedSizedQueue(InsertAndSplitMachine, 100);
 
@@ -1129,7 +1132,7 @@ test "map.ExtendibleMap single" {
             }
             return Drive{ .Complete = false };
         }
-    }.drive);
+    });
 
     const expect = std.testing.expect;
 

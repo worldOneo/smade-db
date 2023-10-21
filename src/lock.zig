@@ -60,6 +60,7 @@ pub fn LockReadState(comptime T: type, comptime DepMachine: type, comptime Creat
                         self.* = This.State{ .Read = .{ .creator = v.creator, .lock = v.lock } };
                         return .Incomplete;
                     } else {
+                        v.machine.deinit();
                         return Drive{ .Complete = v.result };
                     }
                 },
@@ -134,12 +135,12 @@ pub fn OptLock(comptime T: type) type {
 
         pub fn ReadStateMachine(comptime DepMachine: type, comptime Result: type, comptime Creator: type) type {
             const LockRead = LockReadState(T, DepMachine, Creator, Result);
-            return state.Machine(LockRead.State, Result, LockRead.drive);
+            return state.Machine(LockRead.State, Result, LockRead);
         }
 
         pub fn WriteStateMachine(comptime DepMachine: type, comptime Result: type, comptime Creator: type) type {
             const LockWrite = LockWriteState(T, DepMachine, Creator, Result);
-            return state.Machine(LockWrite.State, Result, LockWrite.drive);
+            return state.Machine(LockWrite.State, Result, LockWrite);
         }
 
         pub fn read(this: *This, comptime DepMachine: type, comptime Result: type, comptime Creator: type, creator: Creator) ReadStateMachine(DepMachine, Result, Creator) {

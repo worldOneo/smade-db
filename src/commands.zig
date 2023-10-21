@@ -31,7 +31,7 @@ const GetCreator = state.Creator(GetMachine, GetMachine, struct {
 
 const GetMachine = state.DepMachine(GetState, GetResult, *const map.SmallMap, struct {
     const Drive = state.Drive(GetResult);
-    fn drive(s: *GetState, dep: *const map.SmallMap) Drive {
+    pub fn drive(s: *GetState, dep: *const map.SmallMap) Drive {
         var maybe_val = dep.get(s.hash, &s.key);
         if (maybe_val) |val| {
             if (val.asConstString()) |str| {
@@ -43,7 +43,11 @@ const GetMachine = state.DepMachine(GetState, GetResult, *const map.SmallMap, st
         }
         return Drive{ .Complete = null };
     }
-}.drive);
+
+    pub fn deinit(s: *GetState) void {
+        s.key.deinit(s.allocator);
+    }
+});
 
 const ExGetMachine = map.ExtendibleMap.ReadMachine(GetMachine, GetCreator, GetResult);
 
@@ -74,7 +78,7 @@ const SetMachine = state.Machine(SetState, SetResult, struct {
         }
         return .Incomplete;
     }
-}.drive);
+});
 
 const CommandError = error{
     UnsupportedCommand,
@@ -146,10 +150,11 @@ const CommandState = union(enum) {
 const CommandResult = CommandError!map.Value;
 const CommandMachine = state.Machine(CommandState, CommandResult, struct {
     const Drive = state.Drive(CommandResult);
-    fn drive(s: *CommandState) Drive {
+    pub fn drive(s: *CommandState) Drive {
         switch (s.*) {
             CommandState.Get => |*get_machine| {
                 if (get_machine.drive()) |res| {
+                    get_machine.deinit();
                     var res_val = res catch |err| return Drive{ .Complete = err };
                     if (res_val) |val| {
                         return Drive{ .Complete = map.Value.fromString(val) };
@@ -160,13 +165,14 @@ const CommandMachine = state.Machine(CommandState, CommandResult, struct {
             },
             CommandState.Set => |*set_machine| {
                 if (set_machine.drive()) |res| {
+                    set_machine.deinit();
                     return Drive{ .Complete = res };
                 }
                 return .Incomplete;
             },
         }
     }
-}.drive);
+});
 
 test "commands" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
