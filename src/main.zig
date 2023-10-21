@@ -1,30 +1,35 @@
 const std = @import("std");
-const state = @import("./state.zig");
+const io = @import("io.zig");
 
 pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
+    var ctxpool = try io.ContextPool.createPool(100, 1024, 1024, std.heap.page_allocator);
+    var ring: io.IOServer = try io.IOServer.init(ctxpool, 128, 3456);
 
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
+    std.debug.print("Ring started\n", .{});
 
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // don't forget to flush!
-
-    const a: .{i32, i32} = .{1, 2};
-    _ = a;
+    // simple IO Uring echo server
+    while (true) {
+        std.time.sleep(5 * std.time.ns_per_ms);
+        while (ring.work(false) catch |err| {
+            std.debug.print("IO Error: {s}\n", .{@errorName(err)});
+            continue;
+        }) |item| {
+            if (item.lastevent == .Connected) {
+                std.debug.print("Accepted client on: {}\n", .{@as(*align(1) std.os.linux.sockaddr.in, @ptrCast(&item.client_addr)).port});
+                continue;
+            }
+            var ready = item.recvbuffer.dataReady();
+            if (!item.sendbuffer.push(ready)) {
+                std.debug.print("Failed to push data to buff... ._.\n", .{});
+                continue;
+            }
+            item.recvbuffer.dataConsumed(ready.len);
+            ring.send(item) catch |err| {
+                std.debug.print("Failed to send data = {s}", .{@errorName(err)});
+            };
+        }
+        ring.submit() catch |err| {
+            std.debug.print("Failed to submit ring = {s}", .{@errorName(err)});
+        };
+    }
 }
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-
