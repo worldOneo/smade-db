@@ -431,7 +431,7 @@ pub const LocalAllocator = struct {
     pub fn allocateSlice(this: *This, comptime T: type, n: usize) ?[]T {
         const size = roundToClassSize(@sizeOf(T) * n);
         const class = sizeClassOf(size);
-        const ptr = this.class_pages[class].allocateSized(T, size).?;
+        const ptr = this.class_pages[class].allocateSized(T, size) orelse return null;
         const slice: [*]T = @ptrCast(ptr);
         return slice[0..size];
     }

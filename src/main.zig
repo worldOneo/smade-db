@@ -36,8 +36,11 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 }
                 commandmachine.deinit();
                 s.command = null;
-                return .Incomplete;
+                if (s.client.invalid) {
+                    return .{ .Complete = {} };
+                }
             }
+            return .Incomplete;
         }
         if (s.client.invalid) {
             return .{ .Complete = {} };
@@ -71,6 +74,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 }
                 return .Incomplete;
             }
+            vv.value.deinit(s.allocator);
             _ = s.client.sendbuffer.push("-Not a command\r\n");
         }
         return .Incomplete;
@@ -158,7 +162,7 @@ const Config = struct {
 };
 
 // TODO: Investigate random freezes this is just a remine its
-fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, termination: *std.atomic.Atomic(i32), config: Config) void {
+fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, status: *std.atomic.Atomic(u64), config: Config) void {
     var la = alloc.LocalAllocator.init(allocator);
     var ctxpool = io.ContextPool.createPool(config.io_contexts, config.recv_buffer_size, config.send_buffer_size, std.heap.page_allocator) catch |err| {
         std.debug.print("#{} failed to allocate IO Context pool: {s}\n", .{ worker_id, @errorName(err) });
@@ -174,11 +178,13 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
     };
 
     std.debug.print("#{} Ring started\n", .{worker_id});
+    var wstatus = WorkerStatus{};
 
     // simple IO Uring echo server
     var cansleep = true;
     while (true) {
-        if (termination.load(std.atomic.Ordering.Monotonic) == 1) return;
+        wstatus.sleep = cansleep;
+        status.store(wstatus.toInt(), std.atomic.Ordering.Monotonic);
         while (ring.work(cansleep) catch |err| {
             std.debug.print("#{} IO Error: {s}\n", .{ worker_id, @errorName(err) });
             continue;
@@ -187,6 +193,8 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
             if (item.lastevent == .Connected) {
                 std.debug.print("#{} Accepted client on: {}\n", .{ worker_id, item.client_fd });
                 if (evt_loop.claim()) |node| {
+                    wstatus.connection_count += 1;
+                    wstatus.event_loop += 1;
                     node.task = ExecutionMachine.init(ExecutionState{
                         .allocator = &la,
                         .client = item,
@@ -203,6 +211,8 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                 if (item.userdata == 1) {
                     item.userdata = 0;
                     if (evt_loop.claim()) |node| {
+                        wstatus.event_loop += 1;
+
                         node.task = ExecutionMachine.init(ExecutionState{
                             .allocator = &la,
                             .client = item,
@@ -215,6 +225,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
             }
             if (item.lastevent == .Lost and item.userdata == 1) {
                 std.debug.print("#{} Closing connection: {}\n", .{ worker_id, item.client_fd });
+                wstatus.connection_count -= 1;
                 ring.close(item) catch |err| {
                     std.debug.print("#{} Failed to schedule close: {s}\n", .{ worker_id, @errorName(err) });
                 };
@@ -232,8 +243,11 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                 ring.close(task.task.state.client) catch |err| {
                     std.debug.print("#{} Failed to schedule close: {s}\n", .{ worker_id, @errorName(err) });
                 };
+                wstatus.event_loop -= 1;
+                wstatus.connection_count -= 1;
                 evt_loop.remove(task);
             } else if (task.task.state.donothing) {
+                wstatus.event_loop -= 1;
                 task.task.state.client.userdata = 1; // Wait for more data - remove from scheduler
                 evt_loop.remove(task);
             } else {
@@ -255,6 +269,34 @@ fn seql(a: []const u8, b: []const u8) bool {
     if (a.len == 0 or a[0] != '-') return false;
     return std.mem.eql(u8, a[1..a.len], b);
 }
+
+const WorkerStatus = struct {
+    sleep: bool = false,
+    connection_count: u64 = 0,
+    event_loop: u64 = 0,
+
+    pub fn fromInt(i: u64) WorkerStatus {
+        var data = i;
+        var w: WorkerStatus = undefined;
+        w.sleep = data & 1 == 1;
+        data >>= 1;
+        w.connection_count = (data & 0b1111111111);
+        data >>= 10;
+        w.event_loop = (data & 0b1111111111);
+        data >>= 10;
+        return w;
+    }
+
+    pub fn toInt(this: WorkerStatus) u64 {
+        var data: u64 = 0;
+        data += this.event_loop;
+        data <<= 10;
+        data += this.connection_count;
+        data <<= 1;
+        data |= @intFromBool(this.sleep);
+        return data;
+    }
+};
 
 pub fn main() !void {
     var config: Config = .{};
@@ -346,13 +388,24 @@ pub fn main() !void {
     try data.setup(config.max_expansions, std.heap.page_allocator, &la);
 
     var threads: [10000]std.Thread = undefined; // who cares
-    var terminator = std.atomic.Atomic(i32).init(0);
+    var status: [10000]std.atomic.Atomic(u64) = undefined;
     for (0..config.thread_count) |thread_num| {
         std.debug.print("Spawning thread nr. {}\n", .{thread_num});
-        threads[thread_num] = std.Thread.spawn(.{}, worker, .{ &ga, &data, thread_num, &terminator, config }) catch |err| {
+        status[thread_num] = std.atomic.Atomic(u64).init(0);
+        threads[thread_num] = std.Thread.spawn(.{}, worker, .{ &ga, &data, thread_num, &status[thread_num], config }) catch |err| {
             std.debug.print("Failed to spawn thread: {s}\n", .{@errorName(err)});
             std.os.exit(1);
         };
+    }
+
+    var arr = [1]u8{0};
+    while (true) {
+        _ = try std.io.getStdIn().read(&arr);
+        for (0..config.thread_count) |thread| {
+            const w = status[thread].load(std.atomic.Ordering.Monotonic);
+            const wstatus = WorkerStatus.fromInt(w);
+            std.debug.print("Thread {}, sleep = {}, connections = {}, event loop = {}\n", .{ thread, wstatus.sleep, wstatus.connection_count, wstatus.event_loop });
+        }
     }
 
     threads[0].join();

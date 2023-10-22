@@ -734,13 +734,13 @@ pub const ExtendibleMap = struct {
     pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
         var tmp: SmallMap = small_map.*;
         var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)) orelse {
-            std.debug.print("OOM", .{});
+            std.debug.print("OOM\n", .{});
             return null;
         };
         const next_level = small_map.level + 1;
 
         if (next_level > this.max_expansions + dict_level_zero) {
-            std.debug.print("OOS", .{});
+            std.debug.print("OOS\n", .{});
             // we cant expand beyond this magic
             return null;
         }
@@ -809,7 +809,7 @@ pub fn FixedSizedQueue(comptime T: type, comptime Size: usize) type {
         const This = @This();
         pub fn init() This {
             var a: [RSize]T = undefined;
-            return This{ .values = a, .read = 0, .write = 0 };
+            return This{ .values = a, .read = 0, .write = 0, .size = 0 };
         }
 
         pub fn push(this: *This, item: T) bool {

@@ -111,6 +111,7 @@ pub const IOEvent = enum {
     Connected,
     None,
     Data,
+    Write,
     Lost,
 };
 
@@ -275,56 +276,62 @@ pub const IOServer = struct {
             _ = try this.uring.submit();
             this.accepting = true;
         }
-        if (!can_sleep) {
-            const ready = this.uring.cq_ready();
-            if (ready == 0) return null;
-        }
-        const cqe = try this.uring.copy_cqe();
-        const req = IORequest.fromInt(cqe.user_data);
-        const res = cqe.res;
-        var ctx = &this.contextpool.contexts[req.contextid];
-        switch (req.requesttype) {
-            .Accept => {
-                try this.addAcceptRequest();
-                if (res < 0) return error.FailedToAcceptClient;
-                ctx.client_fd = res;
-                ctx.invalid = false;
-                ctx.lastevent = .Connected;
-                try this.addReadRequest(ctx);
-            },
-            .Read => {
-                if (res > 0) {
-                    if (ctx.lastevent != .Lost) {
-                        ctx.recvbuffer.written += @intCast(res);
-                        if (ctx.recvbuffer.written >= 1024) unreachable;
-                        try this.addReadRequest(ctx);
-                        ctx.lastevent = .Data;
-                    }
-                } else {
-                    ctx.lastevent = .Lost;
-                    ctx.invalid = true;
-                }
-            },
-            .Write => {
-                ctx.is_sending = false;
-                if (res > 0) {
-                    if (ctx.lastevent != .Lost) {
-                        ctx.sendbuffer.dataConsumed(@intCast(res));
-                        if (res < req.sending) {
-                            ctx.sendbuffer.cleanup(); // :(
-                            try this.addSendRequest(ctx);
+
+        while (true) {
+            if (!can_sleep) {
+                const ready = this.uring.cq_ready();
+                if (ready == 0) return null;
+            }
+            const cqe = try this.uring.copy_cqe();
+            const req = IORequest.fromInt(cqe.user_data);
+            const res = cqe.res;
+            var ctx = &this.contextpool.contexts[req.contextid];
+            switch (req.requesttype) {
+                .Accept => {
+                    try this.addAcceptRequest();
+                    if (res < 0) return error.FailedToAcceptClient;
+                    ctx.client_fd = res;
+                    ctx.invalid = false;
+                    ctx.lastevent = .Connected;
+                    try this.addReadRequest(ctx);
+                },
+                .Read => {
+                    if (res > 0) {
+                        if (ctx.lastevent != .Lost) {
+                            ctx.recvbuffer.written += @intCast(res);
+                            if (ctx.recvbuffer.written >= 1024) unreachable;
+                            try this.addReadRequest(ctx);
+                            ctx.lastevent = .Data;
                         }
+                    } else {
+                        ctx.lastevent = .Lost;
+                        ctx.invalid = true;
                     }
-                } else {
-                    ctx.lastevent = .Lost;
-                    ctx.invalid = true;
-                }
-            },
-            .Close => {
-                this.done(ctx);
-            },
+                },
+                .Write => {
+                    ctx.is_sending = false;
+                    if (res > 0) {
+                        if (ctx.lastevent != .Lost) {
+                            ctx.sendbuffer.dataConsumed(@intCast(res));
+                            if (res < req.sending) {
+                                ctx.sendbuffer.cleanup(); // :(
+                                try this.addSendRequest(ctx);
+                            }
+                            ctx.lastevent = .Write;
+                        }
+                    } else {
+                        ctx.lastevent = .None;
+                        ctx.invalid = true;
+                    }
+                    continue;
+                },
+                .Close => {
+                    this.done(ctx);
+                    continue;
+                },
+            }
+            return ctx;
         }
-        return ctx;
     }
 
     fn done(this: *This, ctx: *ConnectionContext) void {
@@ -340,7 +347,9 @@ pub const IOServer = struct {
     }
 
     pub fn send(this: *This, ctx: *ConnectionContext) !void {
-        if (ctx.sendbuffer.dataReady().len == 0) return;
+        if (ctx.sendbuffer.dataReady().len == 0) {
+            return;
+        }
         try this.addSendRequest(ctx);
     }
 
