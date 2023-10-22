@@ -189,7 +189,7 @@ pub const IOServer = struct {
 
     const This = @This();
 
-    pub fn init(pool: ContextPool, queue_depth: u13, port: u16) IOServerSetupError!This {
+    pub fn init(pool: ContextPool, queue_depth: u13, port: u16) !This {
         var server: IOServer = undefined;
         server.accepting = false;
 
@@ -220,7 +220,7 @@ pub const IOServer = struct {
             return error.MarkListen;
         }
 
-        server.uring = linux.IO_Uring.init(queue_depth, 0) catch return error.IOUringSetup;
+        server.uring = try linux.IO_Uring.init(queue_depth, 0);
         server.contextpool = pool;
         return server;
     }
@@ -288,14 +288,18 @@ pub const IOServer = struct {
                 try this.addAcceptRequest();
                 if (res < 0) return error.FailedToAcceptClient;
                 ctx.client_fd = res;
-                try this.addReadRequest(ctx);
+                ctx.invalid = false;
                 ctx.lastevent = .Connected;
+                try this.addReadRequest(ctx);
             },
             .Read => {
                 if (res > 0) {
-                    ctx.recvbuffer.written += @intCast(res);
-                    try this.addReadRequest(ctx);
-                    ctx.lastevent = .Data;
+                    if (ctx.lastevent != .Lost) {
+                        ctx.recvbuffer.written += @intCast(res);
+                        if (ctx.recvbuffer.written >= 1024) unreachable;
+                        try this.addReadRequest(ctx);
+                        ctx.lastevent = .Data;
+                    }
                 } else {
                     ctx.lastevent = .Lost;
                     ctx.invalid = true;
@@ -304,10 +308,12 @@ pub const IOServer = struct {
             .Write => {
                 ctx.is_sending = false;
                 if (res > 0) {
-                    ctx.sendbuffer.dataConsumed(@intCast(res));
-                    if (res < req.sending) {
-                        ctx.sendbuffer.cleanup(); // :(
-                        try this.addSendRequest(ctx);
+                    if (ctx.lastevent != .Lost) {
+                        ctx.sendbuffer.dataConsumed(@intCast(res));
+                        if (res < req.sending) {
+                            ctx.sendbuffer.cleanup(); // :(
+                            try this.addSendRequest(ctx);
+                        }
                     }
                 } else {
                     ctx.lastevent = .Lost;
