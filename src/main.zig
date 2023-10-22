@@ -44,7 +44,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
         }
 
         if (s.client.recvbuffer.dataReady().len == 0) {
-            // s.donothing = true; TODO: Figure out why I/O Suspension is broke
+            s.donothing = true;
             return .Incomplete;
         }
 
@@ -118,6 +118,7 @@ fn EventLoop(comptime Size: usize) type {
             const idx = this.freeidxs[this.freeidx];
             var node = &this.tasks[idx];
             node.idx = idx;
+            node.prev = null;
             if (this.start) |start| {
                 node.next = start;
                 start.prev = node;
