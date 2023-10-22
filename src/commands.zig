@@ -80,7 +80,7 @@ const SetMachine = state.Machine(SetState, SetResult, struct {
     }
 });
 
-const CommandError = error{
+pub const CommandError = error{
     UnsupportedCommand,
     InvalidArgumentCount,
     InvalidCommandFormat,
@@ -89,7 +89,7 @@ const CommandError = error{
     OutOfMemory,
 };
 
-const CommandState = union(enum) {
+pub const CommandState = union(enum) {
     Set: SetMachine,
     Get: ExGetMachine,
 
@@ -147,8 +147,8 @@ const CommandState = union(enum) {
     }
 };
 
-const CommandResult = CommandError!map.Value;
-const CommandMachine = state.Machine(CommandState, CommandResult, struct {
+pub const CommandResult = CommandError!map.Value;
+pub const CommandMachine = state.Machine(CommandState, CommandResult, struct {
     const Drive = state.Drive(CommandResult);
     pub fn drive(s: *CommandState) Drive {
         switch (s.*) {

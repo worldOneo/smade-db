@@ -94,6 +94,7 @@ pub const ContextPool = struct {
     fn get(this: *This) ?*ConnectionContext {
         if (this.idx > 0) {
             const ctx = &this.contexts[this.idxslab[this.idx - 1]];
+            ctx.poolid = this.idxslab[this.idx - 1];
             this.idx -= 1;
             return ctx;
         }
@@ -117,6 +118,7 @@ pub const IORequestType = enum(u8) {
     Accept,
     Read,
     Write,
+    Close,
 };
 
 const IORequest = struct {
@@ -142,12 +144,25 @@ const IORequest = struct {
 pub const ConnectionContext = struct {
     is_sending: bool,
     poolid: usize,
-    userdata: *anyopaque,
+    userdata: u64,
     lastevent: IOEvent,
+    invalid: bool,
     client_addr: linux.sockaddr,
     client_fd: i32,
     recvbuffer: Buffer,
     sendbuffer: Buffer,
+
+    fn reset(this: *ConnectionContext) void {
+        this.is_sending = false;
+        this.lastevent = .Lost;
+        this.invalid = true;
+        this.client_fd = -1;
+        this.recvbuffer.read = 0;
+        this.recvbuffer.written = 0;
+        this.sendbuffer.read = 0;
+        this.sendbuffer.written = 0;
+        this.userdata = 0;
+    }
 };
 
 const IOServerSetupError = error{
@@ -235,7 +250,7 @@ pub const IOServer = struct {
     }
 
     fn addSendRequest(this: *This, ctx: *ConnectionContext) !void {
-        if (ctx.is_sending) {
+        if (ctx.is_sending or ctx.invalid) {
             return;
         }
         ctx.is_sending = true;
@@ -255,15 +270,15 @@ pub const IOServer = struct {
     }
 
     pub fn work(this: *This, can_sleep: bool) !?*ConnectionContext {
-        _ = can_sleep;
         if (!this.accepting) {
             try this.addAcceptRequest();
             _ = try this.uring.submit();
             this.accepting = true;
         }
-
-        const ready = this.uring.cq_ready();
-        if (ready == 0) return null;
+        if (!can_sleep) {
+            const ready = this.uring.cq_ready();
+            if (ready == 0) return null;
+        }
         const cqe = try this.uring.copy_cqe();
         const req = IORequest.fromInt(cqe.user_data);
         const res = cqe.res;
@@ -277,13 +292,13 @@ pub const IOServer = struct {
                 ctx.lastevent = .Connected;
             },
             .Read => {
-                if (res >= 0) {
+                if (res > 0) {
                     ctx.recvbuffer.written += @intCast(res);
                     try this.addReadRequest(ctx);
                     ctx.lastevent = .Data;
                 } else {
                     ctx.lastevent = .Lost;
-                    // TODO: Kill the client
+                    ctx.invalid = true;
                 }
             },
             .Write => {
@@ -296,11 +311,26 @@ pub const IOServer = struct {
                     }
                 } else {
                     ctx.lastevent = .Lost;
-                    // TODO: Kill the client
+                    ctx.invalid = true;
                 }
+            },
+            .Close => {
+                this.done(ctx);
             },
         }
         return ctx;
+    }
+
+    fn done(this: *This, ctx: *ConnectionContext) void {
+        ctx.reset();
+        this.contextpool.returnCtx(ctx);
+    }
+
+    pub fn close(this: *This, ctx: *ConnectionContext) !void {
+        _ = try this.uring.close((IORequest{
+            .contextid = ctx.poolid,
+            .requesttype = .Close,
+        }).toInt(), ctx.client_fd);
     }
 
     pub fn send(this: *This, ctx: *ConnectionContext) !void {

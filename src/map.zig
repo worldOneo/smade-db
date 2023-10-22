@@ -802,6 +802,7 @@ pub fn FixedSizedQueue(comptime T: type, comptime Size: usize) type {
     const RSize = Size + 1;
     return struct {
         values: [RSize]T,
+        size: usize,
         read: usize,
         write: usize,
 
@@ -811,26 +812,28 @@ pub fn FixedSizedQueue(comptime T: type, comptime Size: usize) type {
             return This{ .values = a, .read = 0, .write = 0 };
         }
 
-        fn push(this: *This, item: T) bool {
+        pub fn push(this: *This, item: T) bool {
             const next_idx = (this.write + 1) % RSize;
             if (next_idx == this.read) {
                 return false;
             }
+            this.size += 1;
             this.values[this.write] = item;
             this.write = next_idx;
             return true;
         }
 
-        fn pop(this: *This) ?T {
+        pub fn pop(this: *This) ?T {
             if (this.read == this.write) {
                 return null;
             }
+            this.size -= 1;
             const current_idx = this.read;
             this.read = (this.read + 1) % RSize;
             return this.values[current_idx];
         }
 
-        fn isFull(this: *This) bool {
+        pub fn isFull(this: *This) bool {
             const next_idx = (this.write + 1) % RSize;
             return next_idx == this.read;
         }
