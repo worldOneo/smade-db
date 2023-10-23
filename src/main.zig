@@ -17,9 +17,29 @@ const ExecutionState = struct {
     donothing: bool = false,
 };
 
+pub fn transactionInt(machine: *ExecutionMachine) u64 {
+    const ptr = if (machine.state.transaction) |t| t else return 1;
+    const base: u64 = @intFromPtr(ptr);
+    const txstate: u64 = if (machine.state.transaction_prep == 2) 1 else 0;
+    return base | txstate;
+}
+
+pub fn recreateTransaction(machine: *ExecutionMachine, data: u64) void {
+    if (data == 1) return;
+    const one: u64 = 1;
+    const ptrMask: u64 = ~one;
+    const ptr: *commands.MultiMachine = @ptrFromInt(data & ptrMask);
+    const prep: u64 = (data & 1) + 1;
+    machine.state.transaction = ptr;
+    machine.state.transaction_prep = prep;
+}
+
 const ExecutionMachine = state.Machine(ExecutionState, void, struct {
     pub fn drive(s: *ExecutionState) state.Drive(void) {
         s.donothing = false;
+        // Drive transaction
+        // prep = 2 is driving
+        // prep = 1 is reading commands
         if (s.transaction_prep == 2) {
             if (s.transaction) |command| {
                 if (command.drive()) |res| {
@@ -30,6 +50,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                     }
                     s.allocator.free(commands.MultiMachine, command);
                     s.transaction_prep = 0;
+                    s.transaction = null;
                 }
                 return .Incomplete;
             }
@@ -67,7 +88,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
             return .{ .Complete = {} };
         }
 
-        if (s.transaction_prep == 0 and s.client.recvbuffer.dataReady().len == 0) {
+        if (s.client.recvbuffer.dataReady().len == 0) {
             s.donothing = true;
             return .Incomplete;
         }
@@ -101,12 +122,13 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                                 _ = s.client.sendbuffer.push("\r\n");
                                 s.transaction_prep = 0;
                                 var ptr: *commands.MultiMachine = s.transaction.?;
+                                ptr.deinit();
                                 s.allocator.free(commands.MultiMachine, ptr);
                                 vv.value.deinit(s.allocator);
                                 return .Incomplete;
                             };
                             _ = s.client.sendbuffer.push("+QUEUED\r\n");
-                            return drive(s);
+                            return .Incomplete;
                         }
                     } else if (std.mem.eql(u8, f_str.sliceView(), "MULTI")) {
                         // Begin transaction
@@ -115,7 +137,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                             machine.state = commands.MultiState.init(s.allocator, s.data);
                             s.transaction = machine;
                             _ = s.client.sendbuffer.push("+OK\r\n");
-                            return drive(s);
+                            return .Incomplete;
                         } else {
                             _ = s.client.sendbuffer.push("-OOM\r\n");
                             return .Incomplete;
@@ -243,12 +265,14 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
 
     std.debug.print("#{} Ring started\n", .{worker_id});
     var wstatus = WorkerStatus{};
-
-    // simple IO Uring echo server
     var cansleep = true;
+
     while (true) {
+        // report the worker status in an atomic int
         wstatus.sleep = cansleep;
         status.store(wstatus.toInt(), std.atomic.Ordering.Monotonic);
+
+        // Process IO events
         while (ring.work(cansleep) catch |err| {
             std.debug.print("#{} IO Error: {s}\n", .{ worker_id, @errorName(err) });
             continue;
@@ -271,8 +295,12 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                 }
                 continue;
             }
+
+            // More data received
             if (item.lastevent == .Data) {
-                if (item.userdata == 1) {
+                // reschedule suspended event
+                if (item.userdata != 0) {
+                    const txdata = item.userdata;
                     item.userdata = 0;
                     if (evt_loop.claim()) |node| {
                         wstatus.event_loop += 1;
@@ -282,12 +310,25 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                             .client = item,
                             .data = data,
                         });
+                        recreateTransaction(&node.task, txdata);
                     } else {
                         std.debug.print("#{} Failed to reschedule client: {}\n", .{ worker_id, item.client_fd });
                     }
                 }
             }
-            if (item.lastevent == .Lost and item.userdata == 1) {
+
+            // Handle I/O Problems in suspended events
+            if (item.lastevent == .Lost and item.userdata != 0) {
+                var tmp = ExecutionMachine.init(ExecutionState{
+                    .allocator = &la,
+                    .client = item,
+                    .data = data,
+                });
+                recreateTransaction(&tmp, item.userdata);
+                if (tmp.state.transaction) |tx| {
+                    tx.deinit();
+                    la.free(commands.MultiMachine, tx);
+                }
                 std.debug.print("#{} Closing connection due to transmission: {}\n", .{ worker_id, item.client_fd });
                 wstatus.connection_count -= 1;
                 ring.close(item) catch |err| {
@@ -312,7 +353,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                 evt_loop.remove(task);
             } else if (task.task.state.donothing) {
                 wstatus.event_loop -= 1;
-                task.task.state.client.userdata = 1; // Wait for more data - remove from scheduler
+                task.task.state.client.userdata = transactionInt(&task.task); // Wait for more data - remove from scheduler
                 evt_loop.remove(task);
             } else {
                 cansleep = false;

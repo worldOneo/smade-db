@@ -300,6 +300,12 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
         s.release = true;
         return drive(s);
     }
+
+    pub fn deinit(this: *MultiState) void {
+        for (0..this.command_count) |i| {
+            this.commands[i].deinit(this.allocator);
+        }
+    }
 });
 
 pub const CommandError = error{
