@@ -528,6 +528,55 @@ pub const ExtendibleMap = struct {
         }
     });
 
+    const MAcquireState = struct {
+        hash: u64,
+        this: *This,
+        acquired: []AcquireResult,
+    };
+
+    pub const MAcquireMachine = state.Machine(MAcquireState, ?AcquireResult, struct {
+        const Drive = state.Drive(AcquireResult);
+        pub fn drive(s: *MAcquireState) Drive {
+            const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+            const idx = currentIdx(dict, s.hash);
+            var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            for (0..s.acquired.len) |i| {
+                if (s.acquired[i].lock == map_lock) return null;
+            }
+            if (map_lock.tryLock()) |map| {
+                // Dash Algorithm 3 line 11
+                // see ReadMachine
+
+                const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                const new_idx = currentIdx(new_dict, s.hash);
+                const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+
+                if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
+                    map_lock.unlock();
+                    return .Incomplete;
+                }
+                return Drive{ .Complete = .{ .map = map, .lock = map_lock } };
+            }
+            return .Incomplete;
+        }
+    });
+
+    pub fn multi_acquire(this: *This, hash: u64, already_acquired: []AcquireResult) MAcquireMachine {
+        return MAcquireMachine.init(MAcquireState{
+            .hash = hash,
+            .this = this,
+            .acquired = already_acquired,
+        });
+    }
+
+    // multi_get_map is based on trust me bro science.
+    // If *SmallMap is not locked, stuff **will** go wrong.
+    pub fn multi_get_map(this: *This, hash: u64) *SmallMap {
+        const dict: *Dict = this.dict.load(std.atomic.Ordering.Acquire);
+        const current_idx = currentIdx(dict, hash);
+        return &dict.segments[current_idx].value;
+    }
+
     pub fn acquire(this: *This, hash: u64) AcquireMachine {
         return AcquireMachine.init(AcquireState{
             .hash = hash,
