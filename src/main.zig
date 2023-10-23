@@ -55,10 +55,12 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
             _ = s.client.sendbuffer.push("-");
             _ = s.client.sendbuffer.push(@errorName(err));
             _ = s.client.sendbuffer.push("\r\n");
+            std.debug.print("Protocoll error: {s}\n", .{@errorName(err)});
             return .{ .Complete = {} };
         };
         if (resp_value) |v| {
             var vv = v;
+            defer vv.value.deinit(s.allocator);
             s.client.recvbuffer.dataConsumed(v.read_until);
             if (vv.value.asList()) |list| {
                 var vlist = list;
@@ -74,7 +76,6 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 }
                 return .Incomplete;
             }
-            vv.value.deinit(s.allocator);
             _ = s.client.sendbuffer.push("-Not a command\r\n");
         }
         return .Incomplete;
@@ -224,7 +225,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                 }
             }
             if (item.lastevent == .Lost and item.userdata == 1) {
-                std.debug.print("#{} Closing connection: {}\n", .{ worker_id, item.client_fd });
+                std.debug.print("#{} Closing connection due to transmission: {}\n", .{ worker_id, item.client_fd });
                 wstatus.connection_count -= 1;
                 ring.close(item) catch |err| {
                     std.debug.print("#{} Failed to schedule close: {s}\n", .{ worker_id, @errorName(err) });
@@ -239,7 +240,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
         var maybe_task = evt_loop.start;
         while (maybe_task) |task| {
             if (task.task.drive()) |_| {
-                std.debug.print("#{} Closing connection: {}\n", .{ worker_id, task.task.state.client.client_fd });
+                std.debug.print("#{} Closing connection because the task is completed: {}\n", .{ worker_id, task.task.state.client.client_fd });
                 ring.close(task.task.state.client) catch |err| {
                     std.debug.print("#{} Failed to schedule close: {s}\n", .{ worker_id, @errorName(err) });
                 };
