@@ -12,13 +12,28 @@ const ExecutionState = struct {
     data: *map.ExtendibleMap,
     allocator: *alloc.LocalAllocator,
     command: ?commands.CommandMachine = null,
+    transaction: ?*commands.MultiMachine = null,
+    transaction_prep: usize = 0,
     donothing: bool = false,
 };
 
 const ExecutionMachine = state.Machine(ExecutionState, void, struct {
     pub fn drive(s: *ExecutionState) state.Drive(void) {
         s.donothing = false;
-        if (s.command) |*commandmachine| {
+        if (s.transaction_prep == 2) {
+            if (s.transaction) |command| {
+                if (command.drive()) |res| {
+                    if (res) {
+                        _ = s.client.sendbuffer.push("+OK\r\n");
+                    } else {
+                        _ = s.client.sendbuffer.push("-OOM\r\n");
+                    }
+                    s.allocator.free(commands.MultiMachine, command);
+                    s.transaction_prep = 0;
+                }
+                return .Incomplete;
+            }
+        } else if (s.command) |*commandmachine| {
             if (commandmachine.drive()) |result| {
                 if (result) |result_v| {
                     var mapv: commands.SingleCommandResult = result_v;
@@ -52,7 +67,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
             return .{ .Complete = {} };
         }
 
-        if (s.client.recvbuffer.dataReady().len == 0) {
+        if (s.transaction_prep == 0 and s.client.recvbuffer.dataReady().len == 0) {
             s.donothing = true;
             return .Incomplete;
         }
@@ -64,11 +79,52 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
             std.debug.print("Protocoll error: {s}\n", .{@errorName(err)});
             return .{ .Complete = {} };
         };
+
         if (resp_value) |v| {
             var vv = v;
-            defer vv.value.deinit(s.allocator);
+
             s.client.recvbuffer.dataConsumed(v.read_until);
             if (vv.value.asList()) |list| {
+                var first = list.get(0);
+                if (first.asString()) |f_str| {
+                    // Manage transactions
+                    //
+                    if (s.transaction_prep == 1) {
+                        if (std.mem.eql(u8, f_str.sliceView(), "EXEC")) {
+                            s.transaction_prep = 2;
+                            return drive(s);
+                        } else {
+                            var tx: *commands.MultiState = &s.transaction.?.state;
+                            _ = tx.addCommand(list.*) catch |err| {
+                                _ = s.client.sendbuffer.push("-");
+                                _ = s.client.sendbuffer.push(@errorName(err));
+                                _ = s.client.sendbuffer.push("\r\n");
+                                s.transaction_prep = 0;
+                                var ptr: *commands.MultiMachine = s.transaction.?;
+                                s.allocator.free(commands.MultiMachine, ptr);
+                                vv.value.deinit(s.allocator);
+                                return .Incomplete;
+                            };
+                            _ = s.client.sendbuffer.push("+QUEUED\r\n");
+                            return drive(s);
+                        }
+                    } else if (std.mem.eql(u8, f_str.sliceView(), "MULTI")) {
+                        // Begin transaction
+                        if (s.allocator.allocate(commands.MultiMachine)) |machine| {
+                            s.transaction_prep = 1;
+                            machine.state = commands.MultiState.init(s.allocator, s.data);
+                            s.transaction = machine;
+                            _ = s.client.sendbuffer.push("+OK\r\n");
+                            return drive(s);
+                        } else {
+                            _ = s.client.sendbuffer.push("-OOM\r\n");
+                            return .Incomplete;
+                        }
+                    }
+                }
+
+                // the transaction takes ownership of vv.value so we cannot dealloc it if it was eaten.
+                defer vv.value.deinit(s.allocator);
                 var vlist = list;
 
                 if (commands.CommandState.init(s.data, vlist, s.allocator)) |comm_state| {
@@ -82,6 +138,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 }
                 return .Incomplete;
             }
+            vv.value.deinit(s.allocator);
             _ = s.client.sendbuffer.push("-Not a command\r\n");
         }
         return .Incomplete;
