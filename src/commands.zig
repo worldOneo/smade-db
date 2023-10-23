@@ -147,7 +147,16 @@ pub const CommandState = union(enum) {
     }
 };
 
-pub const CommandResult = CommandError!map.Value;
+pub const SingleCommandResult = struct {
+    executed: enum {
+        Get,
+        Set,
+        Multi,
+    },
+    value: map.Value,
+};
+
+pub const CommandResult = CommandError!SingleCommandResult;
 pub const CommandMachine = state.Machine(CommandState, CommandResult, struct {
     const Drive = state.Drive(CommandResult);
     pub fn drive(s: *CommandState) Drive {
@@ -157,16 +166,20 @@ pub const CommandMachine = state.Machine(CommandState, CommandResult, struct {
                     get_machine.deinit();
                     var res_val = res catch |err| return Drive{ .Complete = err };
                     if (res_val) |val| {
-                        return Drive{ .Complete = map.Value.fromString(val) };
+                        return Drive{ .Complete = .{ .executed = .Get, .value = map.Value.fromString(val) } };
                     }
-                    return Drive{ .Complete = map.Value.nil() };
+                    return Drive{ .Complete = .{ .executed = .Get, .value = map.Value.nil() } };
                 }
                 return .Incomplete;
             },
             CommandState.Set => |*set_machine| {
                 if (set_machine.drive()) |res| {
                     set_machine.deinit();
-                    return Drive{ .Complete = res };
+                    if (res) |mapv| {
+                        return Drive{ .Complete = .{ .executed = .Set, .value = mapv } };
+                    } else |err| {
+                        return Drive{ .Complete = err };
+                    }
                 }
                 return .Incomplete;
             },
