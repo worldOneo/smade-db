@@ -531,7 +531,7 @@ pub const ExtendibleMap = struct {
     const MAcquireState = struct {
         hash: u64,
         this: *This,
-        acquired: []AcquireResult,
+        acquired: []?AcquireResult,
     };
 
     pub const MAcquireMachine = state.Machine(MAcquireState, ?AcquireResult, struct {
@@ -541,7 +541,9 @@ pub const ExtendibleMap = struct {
             const idx = currentIdx(dict, s.hash);
             var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
             for (0..s.acquired.len) |i| {
-                if (s.acquired[i].lock == map_lock) return Drive{ .Complete = null };
+                if (s.acquired[i]) |locked| {
+                    if (locked.lock == map_lock) return Drive{ .Complete = null };
+                }
             }
             if (map_lock.tryLock()) |map| {
                 // Dash Algorithm 3 line 11
@@ -561,7 +563,7 @@ pub const ExtendibleMap = struct {
         }
     });
 
-    pub fn multi_acquire(this: *This, hash: u64, already_acquired: []AcquireResult) MAcquireMachine {
+    pub fn multi_acquire(this: *This, hash: u64, already_acquired: []?AcquireResult) MAcquireMachine {
         return MAcquireMachine.init(MAcquireState{
             .hash = hash,
             .this = this,

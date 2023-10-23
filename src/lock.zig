@@ -168,7 +168,8 @@ pub fn OptLock(comptime T: type) type {
         }
 
         pub fn unlock(this: *This) void {
-            _ = this.version.fetchAdd(1, std.atomic.Ordering.Release);
+            const prev = this.version.fetchAdd(1, std.atomic.Ordering.Release);
+            if (prev % 2 == 0) unreachable("Unlocked unlocked value");
         }
 
         pub const Read = struct { version: u64, data: *const T };

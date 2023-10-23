@@ -15,6 +15,7 @@ const ExecutionState = struct {
     transaction: ?*commands.MultiMachine = null,
     transaction_prep: usize = 0,
     donothing: bool = false,
+    calls: usize = 0,
 };
 
 pub fn transactionInt(machine: *ExecutionMachine) u64 {
@@ -36,12 +37,19 @@ pub fn recreateTransaction(machine: *ExecutionMachine, data: u64) void {
 
 const ExecutionMachine = state.Machine(ExecutionState, void, struct {
     pub fn drive(s: *ExecutionState) state.Drive(void) {
+        s.calls += 1;
+        const _100p = s.calls > 100;
         s.donothing = false;
         // Drive transaction
         // prep = 2 is driving
         // prep = 1 is reading commands
         if (s.transaction_prep == 2) {
             if (s.transaction) |command| {
+                if (_100p) std.debug.print("Driving transaction, acqmach = {}, acq = {any}, i = {}\n", .{
+                    command.state.acquiremachine != null,
+                    command.state.shards.shards,
+                    command.state.shards_acquired,
+                });
                 if (command.drive()) |res| {
                     if (res) {
                         _ = s.client.sendbuffer.push("+OK\r\n");
@@ -111,25 +119,27 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                     // Manage transactions
                     //
                     if (s.transaction_prep == 1) {
-                        if (std.mem.eql(u8, f_str.sliceView(), "EXEC")) {
+                        var tx: *commands.MultiState = &s.transaction.?.state;
+
+                        var exec = tx.addCommand(list.*) catch |err| {
+                            _ = s.client.sendbuffer.push("-");
+                            _ = s.client.sendbuffer.push(@errorName(err));
+                            _ = s.client.sendbuffer.push("\r\n");
+                            s.transaction_prep = 0;
+                            var ptr: *commands.MultiMachine = s.transaction.?;
+                            ptr.deinit();
+                            s.allocator.free(commands.MultiMachine, ptr);
+                            vv.value.deinit(s.allocator);
+                            return .Incomplete;
+                        };
+
+                        if (exec) {
                             s.transaction_prep = 2;
                             return drive(s);
-                        } else {
-                            var tx: *commands.MultiState = &s.transaction.?.state;
-                            _ = tx.addCommand(list.*) catch |err| {
-                                _ = s.client.sendbuffer.push("-");
-                                _ = s.client.sendbuffer.push(@errorName(err));
-                                _ = s.client.sendbuffer.push("\r\n");
-                                s.transaction_prep = 0;
-                                var ptr: *commands.MultiMachine = s.transaction.?;
-                                ptr.deinit();
-                                s.allocator.free(commands.MultiMachine, ptr);
-                                vv.value.deinit(s.allocator);
-                                return .Incomplete;
-                            };
-                            _ = s.client.sendbuffer.push("+QUEUED\r\n");
-                            return .Incomplete;
                         }
+
+                        _ = s.client.sendbuffer.push("+QUEUED\r\n");
+                        return .Incomplete;
                     } else if (std.mem.eql(u8, f_str.sliceView(), "MULTI")) {
                         // Begin transaction
                         if (s.allocator.allocate(commands.MultiMachine)) |machine| {
