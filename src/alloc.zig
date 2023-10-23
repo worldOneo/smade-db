@@ -304,7 +304,7 @@ const SizeClass = struct {
         this.deferedFrees();
 
         var maybe_page = this.pages;
-        var i: usize = 0;
+
         // Collect local pages
         while (maybe_page) |page| {
             maybe_page = page.next_page;
@@ -330,13 +330,6 @@ const SizeClass = struct {
                     this.unlinkPage(page);
                 }
             }
-            if (page.next_page) |next| {
-                if (page == next) {
-                    std.os.exit(0);
-                }
-            }
-            i += 1;
-            if (i > 50) std.os.exit(0);
         }
 
         allocLog("thread {} allocating slow in size class {*} requesting new page\n", .{ std.Thread.getCurrentId(), this });
