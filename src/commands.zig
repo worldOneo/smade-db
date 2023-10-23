@@ -104,7 +104,7 @@ const MultiShardsSet = struct {
     }
 };
 
-const MultiState = struct {
+pub const MultiState = struct {
     allocator: *alloc.LocalAllocator,
     data: *map.ExtendibleMap,
 
@@ -120,7 +120,7 @@ const MultiState = struct {
     commands_executed: usize = 0,
 
     splitmachine: ?map.ExtendibleMap.SplitMachine = null,
-    acquiremachine: ?map.ExtendibleMap.AcquireMachine = null,
+    acquiremachine: ?map.ExtendibleMap.MAcquireMachine = null,
 
     const This = @This();
 
@@ -165,13 +165,24 @@ const MultiState = struct {
     }
 };
 
-const MultiMachine = state.Machine(MultiState, bool, struct {
+pub const MultiMachine = state.Machine(MultiState, bool, struct {
     pub fn drive(s: *MultiState) state.Drive(bool) {
         if (s.release) {
             // Step 3: Release all the shards held by the transaction
             //
             for (0..s.shards_acquired) |i| {
                 s.acquired[i].lock.unlock();
+            }
+
+            for (0..s.commands_executed) |i| {
+                if (s.rollbacks[i]) |v| {
+                    var vv = v;
+                    vv.deinit(s.allocator);
+                }
+            }
+
+            for (0..s.command_count) |i| {
+                s.commands[i].deinit(s.allocator);
             }
             // if we didn't have to roolback, this was a great trip...
             return state.Drive(bool){ .Complete = !s.rollback };
@@ -186,28 +197,32 @@ const MultiMachine = state.Machine(MultiState, bool, struct {
                     return drive(s);
                 }
                 s.commands_executed -= 1;
-                const command = s.commands[s.commands_executed];
-                var str = command.get(1).asString().?;
-                const shash = str.hash();
-                var small_map = s.data.multi_get_map(shash);
 
                 // undo the commands
                 if (s.rollbacks[s.commands_executed]) |*v| {
+                    var command = s.commands[s.commands_executed];
+                    var str = command.get(1).asString().?;
+                    const shash = str.hash();
+                    var small_map = s.data.multi_get_map(shash);
                     if (v.asString()) |str_val| {
                         var res = small_map.updateOrCreate(shash, str.*);
                         switch (res) {
                             map.SmallMap.Result.Present => |val| {
                                 val.deinit(s.allocator);
-                                val.* = str_val;
+                                val.* = map.Value.fromString(str_val.*);
                             },
                             map.SmallMap.Result.Absent => unreachable,
                             map.SmallMap.Result.Split => unreachable,
                         }
-                    } else if (v.nil()) {
-                        if (small_map.delete(shash, str)) |old| {
+                        command.get(1).* = resp.RespValue.from({});
+                        command.deinit(s.allocator);
+                    } else if (!v.isPresent()) {
+                        if (small_map.delete(shash, str)) |cold| {
+                            var old = cold;
                             old.key.deinit(s.allocator);
                             old.value.deinit(s.allocator);
                         }
+                        command.deinit(s.allocator);
                     }
                 }
             }
@@ -230,7 +245,7 @@ const MultiMachine = state.Machine(MultiState, bool, struct {
             var str = command.get(1).asString().?;
             s.acquiremachine = s.data.multi_acquire(str.hash(), s.acquired[0..s.shards_acquired]);
             return drive(s);
-        } else if (s.splitmachine) |split_machine| {
+        } else if (s.splitmachine) |*split_machine| {
             // Step 2.1 Split the map we want to insert into
             //
             if (split_machine.drive()) |whoops_acquired| {
@@ -242,7 +257,7 @@ const MultiMachine = state.Machine(MultiState, bool, struct {
         } else if (s.commands_executed < s.command_count) {
             // Step 2. Execute the command
             //
-            const command = s.commands[s.commands_executed];
+            var command = s.commands[s.commands_executed];
             const execute = command.get(0).asString().?;
             var str = command.get(1).asString().?;
             const shash = str.hash();
@@ -258,15 +273,12 @@ const MultiMachine = state.Machine(MultiState, bool, struct {
                         s.rollbacks[s.command_count] = val.*;
                         val.* = map.Value.fromString(command.get(2).asString().?.*);
                         command.get(2).* = resp.RespValue.from({});
-                        command.deinit(s.allocator);
                         s.commands_executed += 1;
                     },
                     map.SmallMap.Result.Absent => |val| {
                         s.rollbacks[s.command_count] = map.Value.nil();
                         val.* = map.Value.fromString(command.get(2).asString().?.*);
-                        command.get(1).* = resp.RespValue.from({});
                         command.get(2).* = resp.RespValue.from({});
-                        command.deinit(s.allocator);
                         s.commands_executed += 1;
                     },
                     map.SmallMap.Result.Split => {
@@ -457,6 +469,9 @@ test "commands.Multi" {
     try expect(!try multi.addCommand(listSet1));
     try expect(!try multi.addCommand(listSet));
     try expect(try multi.addCommand(listExec));
+
+    var multiMachine = MultiMachine.init(multi);
+    try expect(multiMachine.run());
 
     arena.deinit();
 }

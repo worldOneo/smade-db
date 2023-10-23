@@ -230,7 +230,7 @@ pub const SmallMap = struct {
         this.size = 0;
     }
 
-    const Result = union(enum) {
+    pub const Result = union(enum) {
         Present: *Value,
         Absent: *Value,
         Split,
@@ -535,13 +535,13 @@ pub const ExtendibleMap = struct {
     };
 
     pub const MAcquireMachine = state.Machine(MAcquireState, ?AcquireResult, struct {
-        const Drive = state.Drive(AcquireResult);
+        const Drive = state.Drive(?AcquireResult);
         pub fn drive(s: *MAcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
             var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
             for (0..s.acquired.len) |i| {
-                if (s.acquired[i].lock == map_lock) return null;
+                if (s.acquired[i].lock == map_lock) return Drive{ .Complete = null };
             }
             if (map_lock.tryLock()) |map| {
                 // Dash Algorithm 3 line 11
@@ -574,7 +574,7 @@ pub const ExtendibleMap = struct {
     pub fn multi_get_map(this: *This, hash: u64) *SmallMap {
         const dict: *Dict = this.dict.load(std.atomic.Ordering.Acquire);
         const current_idx = currentIdx(dict, hash);
-        return &dict.segments[current_idx].value;
+        return &dict.segments[current_idx].load(std.atomic.Ordering.Monotonic).value;
     }
 
     pub fn acquire(this: *This, hash: u64) AcquireMachine {
