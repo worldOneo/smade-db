@@ -275,8 +275,13 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
         wstatus.sleep = cansleep;
         status.store(wstatus.toInt(), std.atomic.Ordering.Monotonic);
 
+        var iterator = ring.work(cansleep) catch |err| {
+            std.debug.print("#{} Failed to submit ring = {s}\n", .{ worker_id, @errorName(err) });
+            continue;
+        };
+
         // Process IO events
-        while (ring.work(cansleep) catch |err| {
+        while (iterator.next() catch |err| {
             std.debug.print("#{} IO Error: {s}\n", .{ worker_id, @errorName(err) });
             continue;
         }) |item| {

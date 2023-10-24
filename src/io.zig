@@ -181,6 +181,82 @@ fn sysint(a: usize) i32 {
     return signed;
 }
 
+pub const IOEventIterator = struct {
+    server: *IOServer,
+    cqes: [32]linux.io_uring_cqe,
+    copied: usize,
+    remaining: u32,
+
+    const This = @This();
+
+    pub fn next(this: *This) !?*ConnectionContext {
+        while (true) {
+            var cqe: linux.io_uring_cqe = undefined;
+            if (this.copied > 0) {
+                this.copied -= 1;
+                cqe = this.cqes[this.copied];
+            } else if (this.remaining > 0) {
+                const max_wait = @min(this.remaining, 32);
+                const copied = try this.server.uring.copy_cqes(this.cqes[0..max_wait], max_wait);
+                this.copied += copied;
+                this.remaining -= copied;
+                return this.next();
+            } else {
+                return null;
+            }
+
+            const req = IORequest.fromInt(cqe.user_data);
+            const res = cqe.res;
+            var ctx = &this.server.contextpool.contexts[req.contextid];
+            switch (req.requesttype) {
+                .Accept => {
+                    try this.server.addAcceptRequest();
+                    if (res < 0) return error.FailedToAcceptClient;
+                    ctx.client_fd = res;
+                    ctx.invalid = false;
+                    ctx.lastevent = .Connected;
+                    try this.server.addReadRequest(ctx);
+                },
+                .Read => {
+                    if (res > 0) {
+                        if (ctx.lastevent != .Lost) {
+                            ctx.recvbuffer.written += @intCast(res);
+                            if (ctx.recvbuffer.written >= 1024) unreachable;
+                            try this.server.addReadRequest(ctx);
+                            ctx.lastevent = .Data;
+                        }
+                    } else {
+                        ctx.lastevent = .Lost;
+                        ctx.invalid = true;
+                    }
+                },
+                .Write => {
+                    ctx.is_sending = false;
+                    if (res > 0) {
+                        if (ctx.lastevent != .Lost) {
+                            ctx.sendbuffer.dataConsumed(@intCast(res));
+                            if (res < req.sending) {
+                                ctx.sendbuffer.cleanup(); // :(
+                                try this.server.addSendRequest(ctx);
+                            }
+                            ctx.lastevent = .Write;
+                        }
+                    } else {
+                        ctx.lastevent = .None;
+                        ctx.invalid = true;
+                    }
+                    continue;
+                },
+                .Close => {
+                    this.server.done(ctx);
+                    continue;
+                },
+            }
+            return ctx;
+        }
+    }
+};
+
 pub const IOServer = struct {
     contextpool: ContextPool,
     serverfd: i32,
@@ -270,68 +346,19 @@ pub const IOServer = struct {
         };
     }
 
-    pub fn work(this: *This, can_sleep: bool) !?*ConnectionContext {
+    pub fn work(this: *This, can_sleep: bool) !IOEventIterator {
         if (!this.accepting) {
             try this.addAcceptRequest();
             _ = try this.uring.submit();
             this.accepting = true;
         }
 
-        while (true) {
-            if (!can_sleep) {
-                const ready = this.uring.cq_ready();
-                if (ready == 0) return null;
-            }
-            const cqe = try this.uring.copy_cqe();
-            const req = IORequest.fromInt(cqe.user_data);
-            const res = cqe.res;
-            var ctx = &this.contextpool.contexts[req.contextid];
-            switch (req.requesttype) {
-                .Accept => {
-                    try this.addAcceptRequest();
-                    if (res < 0) return error.FailedToAcceptClient;
-                    ctx.client_fd = res;
-                    ctx.invalid = false;
-                    ctx.lastevent = .Connected;
-                    try this.addReadRequest(ctx);
-                },
-                .Read => {
-                    if (res > 0) {
-                        if (ctx.lastevent != .Lost) {
-                            ctx.recvbuffer.written += @intCast(res);
-                            if (ctx.recvbuffer.written >= 1024) unreachable;
-                            try this.addReadRequest(ctx);
-                            ctx.lastevent = .Data;
-                        }
-                    } else {
-                        ctx.lastevent = .Lost;
-                        ctx.invalid = true;
-                    }
-                },
-                .Write => {
-                    ctx.is_sending = false;
-                    if (res > 0) {
-                        if (ctx.lastevent != .Lost) {
-                            ctx.sendbuffer.dataConsumed(@intCast(res));
-                            if (res < req.sending) {
-                                ctx.sendbuffer.cleanup(); // :(
-                                try this.addSendRequest(ctx);
-                            }
-                            ctx.lastevent = .Write;
-                        }
-                    } else {
-                        ctx.lastevent = .None;
-                        ctx.invalid = true;
-                    }
-                    continue;
-                },
-                .Close => {
-                    this.done(ctx);
-                    continue;
-                },
-            }
-            return ctx;
+        if (!can_sleep) {
+            const ready = this.uring.cq_ready();
+            return IOEventIterator{ .copied = 0, .remaining = ready, .cqes = undefined, .server = this };
         }
+        _ = try this.uring.submit_and_wait(1);
+        return this.work(false);
     }
 
     fn done(this: *This, ctx: *ConnectionContext) void {
