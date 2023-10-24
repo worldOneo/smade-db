@@ -528,46 +528,111 @@ pub const ExtendibleMap = struct {
         }
     });
 
-    const MAcquireState = struct {
+    pub const MAcquireItem = struct {
         hash: u64,
-        this: *This,
-        acquired: []?AcquireResult,
+        lock: ?*lock.OptLock(SmallMap),
     };
 
-    pub const MAcquireMachine = state.Machine(MAcquireState, ?AcquireResult, struct {
-        const Drive = state.Drive(?AcquireResult);
+    const MAcquireState = struct {
+        this: *This,
+        items: usize,
+        locks: []MAcquireItem,
+        locks_acquired: usize,
+        setup: bool = false,
+    };
+
+    fn lock_sorter(_: void, a: MAcquireItem, b: MAcquireItem) bool {
+        if (a.lock) |alock| {
+            if (b.lock) |block| {
+                return @intFromPtr(alock) < @intFromPtr(block);
+            } else {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub const MAcquireMachine = state.Machine(MAcquireState, void, struct {
+        const Drive = state.Drive(void);
         pub fn drive(s: *MAcquireState) Drive {
-            const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-            const idx = currentIdx(dict, s.hash);
-            var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-            for (0..s.acquired.len) |i| {
-                if (s.acquired[i]) |locked| {
-                    if (locked.lock == map_lock) return Drive{ .Complete = null };
+            if (!s.setup) {
+                const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                for (s.locks[0..s.items]) |*item| {
+                    const current_idx = currentIdx(dict, item.hash);
+                    item.lock = dict.segments[current_idx].load(std.atomic.Ordering.Monotonic);
                 }
+
+                // We lock the locks in asceding order to avoid any trouble with friends.
+                std.sort.insertion(MAcquireItem, s.locks[0..s.items], {}, lock_sorter);
+                s.setup = true;
             }
-            if (map_lock.tryLock()) |map| {
-                // Dash Algorithm 3 line 11
-                // see ReadMachine
 
-                const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-                const new_idx = currentIdx(new_dict, s.hash);
-                const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            if (s.locks[s.locks_acquired].lock == null) return Drive{ .Complete = {} };
+            const old_lock = s.locks[s.locks_acquired].lock.?;
 
-                if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
-                    map_lock.unlock();
-                    return .Incomplete;
+            // If old_lock == prev_lock it is already locked.
+            if (s.locks_acquired > 0 and old_lock == s.locks[s.locks_acquired - 1].lock.?) {
+                s.locks_acquired += 1;
+                return drive(s);
+            }
+
+            if (old_lock.tryLock()) |_| {
+                const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                const idx = currentIdx(dict, s.locks[s.locks_acquired].hash);
+                const now_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+                if (now_lock != old_lock) {
+                    // now the fun begins.
+
+                    // first find the position to insert the new lock.
+                    // for big arrays binary search could be used
+                    var insert_idx: usize = 0;
+                    while (lock_sorter({}, s.locks[insert_idx], MAcquireItem{ .hash = 0, .lock = now_lock })) : (insert_idx += 1) {}
+
+                    // In the end remove oldlock and insert nowlock
+                    if (insert_idx < s.locks_acquired) {
+                        // next unlock all acquired locks after that index
+                        for (insert_idx..s.locks_acquired) |i| {
+                            if (i > 0 and s.locks[i - 1].lock.? == s.locks[i].lock.?) continue;
+                            s.locks[i].lock.?.unlock();
+                        }
+
+                        // lock1|lock2|lock3|<oldlock>|lock4 ...
+                        //        idx
+                        //       Shift lock2 and lock3 up by one
+
+                        var top = s.locks_acquired;
+                        while (top > insert_idx) : (top -= 1) {
+                            s.locks[top] = s.locks[top - 1];
+                        }
+                    } else if (insert_idx > s.locks_acquired) {
+                        // lock1|<oldlock>|lock2|lock3|lock4 ...
+                        //                        idx
+                        //       Shift lock2 and lock3 down by one
+                        // The null protector prevents null from being shifted from after the valid locks into the locks
+                        var null_protector: usize = if (s.locks[insert_idx].lock == null) 0 else 1;
+                        for ((s.locks_acquired + 1)..(insert_idx + null_protector)) |i| {
+                            s.locks[i - 1] = s.locks[i];
+                        }
+                    }
+                    s.locks[insert_idx].lock = now_lock;
+                    s.locks_acquired = @min(insert_idx, s.locks_acquired);
+                    old_lock.unlock();
+                    return drive(s);
                 }
-                return Drive{ .Complete = .{ .map = map, .lock = map_lock } };
+                s.locks_acquired += 1;
+                return drive(s);
             }
+
             return .Incomplete;
         }
     });
 
-    pub fn multi_acquire(this: *This, hash: u64, already_acquired: []?AcquireResult) MAcquireMachine {
+    pub fn multi_acquire(this: *This, items: usize, locks: []MAcquireItem) MAcquireMachine {
         return MAcquireMachine.init(MAcquireState{
-            .hash = hash,
             .this = this,
-            .acquired = already_acquired,
+            .items = items,
+            .locks = locks,
+            .locks_acquired = 0,
         });
     }
 
