@@ -38,6 +38,7 @@ pub fn recreateTransaction(machine: *ExecutionMachine, data: u64) void {
 const ExecutionMachine = state.Machine(ExecutionState, void, struct {
     pub fn drive(s: *ExecutionState) state.Drive(void) {
         s.donothing = false;
+        s.calls += 1;
         // Drive transaction
         // prep = 2 is driving
         // prep = 1 is reading commands
@@ -83,6 +84,14 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                     return .{ .Complete = {} };
                 }
             }
+            if (s.calls > 16) {
+                return .Incomplete; // thats it, budget well spent
+            }
+            _ = drive(s);
+            if (s.client.invalid) {
+                return .{ .Complete = {} };
+            }
+            s.donothing = false;
             return .Incomplete;
         }
         if (s.client.invalid) {
