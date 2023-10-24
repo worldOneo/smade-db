@@ -132,7 +132,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                         }
 
                         _ = s.client.sendbuffer.push("+QUEUED\r\n");
-                        return .Incomplete;
+                        return drive(s);
                     } else if (std.mem.eql(u8, f_str.sliceView(), "MULTI")) {
                         // Begin transaction
                         if (s.allocator.allocate(commands.MultiMachine)) |machine| {
@@ -140,7 +140,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                             machine.state = commands.MultiState.init(s.allocator, s.data);
                             s.transaction = machine;
                             _ = s.client.sendbuffer.push("+OK\r\n");
-                            return .Incomplete;
+                            return drive(s);
                         } else {
                             _ = s.client.sendbuffer.push("-OOM\r\n");
                             return .Incomplete;

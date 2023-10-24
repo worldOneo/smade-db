@@ -176,7 +176,7 @@ pub const Entry = struct {
     }
 };
 
-const smallMapEntries: usize = 601; // a nice prime which fits into one allocator page, consider 509, 251, or 127
+const smallMapEntries: usize = 302; // a nice number which fits into one allocator page, consider 601, 509, 251, or 127
 
 pub const SmallMap = struct {
     level: u8,
@@ -1028,6 +1028,11 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
 
 const test_threadCount = 6;
 
+test "map.SmallMap allocator compatibility" {
+    std.debug.print("\nSM Size: {}\n", .{@sizeOf(lock.OptLock(SmallMap))});
+    try std.testing.expect(2 * @sizeOf(lock.OptLock(SmallMap)) < 1 << 15);
+}
+
 test "map.ExtendibleMap multi-single" {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     var ga = try alloc.GlobalAllocator.init(50000, arena.allocator());
@@ -1308,8 +1313,10 @@ test "map.SmallMap.basic" {
 
     var a: SmallMap = undefined;
     a.clear(0);
+    const n = smallMapEntries / 2;
+    const h = n / 2;
 
-    for (0..300) |ui| {
+    for (0..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = k;
@@ -1319,7 +1326,7 @@ test "map.SmallMap.basic" {
         }
     }
 
-    for (0..300) |ui| {
+    for (0..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1333,7 +1340,7 @@ test "map.SmallMap.basic" {
         }
     }
 
-    for (0..300) |ui| {
+    for (0..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1342,7 +1349,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (0..150) |ui| {
+    for (0..h) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1351,7 +1358,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (0..150) |ui| {
+    for (0..h) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         if (a.get(k.hash(), &k)) |_| {
@@ -1359,7 +1366,7 @@ test "map.SmallMap.basic" {
         }
     }
 
-    for (150..300) |ui| {
+    for (h..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1368,7 +1375,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (150..300) |ui| {
+    for (h..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
@@ -1377,7 +1384,7 @@ test "map.SmallMap.basic" {
         try expect(as_str.eql(&v));
     }
 
-    for (150..300) |ui| {
+    for (h..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         if (a.get(k.hash(), &k)) |_| {
