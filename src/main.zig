@@ -37,19 +37,12 @@ pub fn recreateTransaction(machine: *ExecutionMachine, data: u64) void {
 
 const ExecutionMachine = state.Machine(ExecutionState, void, struct {
     pub fn drive(s: *ExecutionState) state.Drive(void) {
-        s.calls += 1;
-        const _100p = s.calls > 100;
         s.donothing = false;
         // Drive transaction
         // prep = 2 is driving
         // prep = 1 is reading commands
         if (s.transaction_prep == 2) {
             if (s.transaction) |command| {
-                if (_100p) std.debug.print("Driving transaction, acqmach = {}, acq = {any}, i = {}\n", .{
-                    command.state.acquiremachine != null,
-                    command.state.shards.shards,
-                    command.state.shards_acquired,
-                });
                 if (command.drive()) |res| {
                     if (res) {
                         _ = s.client.sendbuffer.push("+OK\r\n");

@@ -82,41 +82,18 @@ const SetMachine = state.Machine(SetState, SetResult, struct {
 
 const MaxShards = 16; // Hardcode for now... ._.
 
-const MultiShardsSet = struct {
-    shards: [MaxShards]u64,
-    count: usize,
-
-    const This = @This();
-
-    fn empty() This {
-        return .{ .count = 0, .shards = undefined };
-    }
-
-    fn sort(this: *This) void {
-        std.sort.insertion(u64, this.shards[0..this.count], {}, std.sort.asc(u64));
-    }
-
-    fn insert(this: *This, shard: u64) void {
-        var i: usize = 0;
-        while (i < this.count and this.shards[i] != shard) : (i += 1) {}
-        if (i >= this.count) this.count += 1;
-        this.shards[i] = shard;
-    }
-};
-
 pub const MultiState = struct {
     allocator: *alloc.LocalAllocator,
     data: *map.ExtendibleMap,
 
-    acquired: [MaxShards]?map.ExtendibleMap.AcquireResult = [_]?map.ExtendibleMap.AcquireResult{null} ** MaxShards,
-    shards: MultiShardsSet = MultiShardsSet.empty(),
-    shards_acquired: usize = 0,
+    acquired: [MaxShards]map.ExtendibleMap.MAcquireItem = [_]map.ExtendibleMap.MAcquireItem{.{ .hash = 0, .lock = null }} ** MaxShards,
     commands: [MaxShards]resp.RespList = undefined,
     rollbacks: [MaxShards]?map.Value = [_]?map.Value{null} ** MaxShards,
     rollback: bool = false,
     release: bool = false,
     command_count: usize = 0,
     commands_executed: usize = 0,
+    shards_acquired: usize = 0,
 
     splitmachine: ?map.ExtendibleMap.SplitMachine = null,
     acquiremachine: ?map.ExtendibleMap.MAcquireMachine = null,
@@ -141,7 +118,7 @@ pub const MultiState = struct {
                 // GET
                 if (command.length != 2) return error.InvalidArgumentCount;
                 if (command.get(1).asString() == null) return error.InvalidArguments;
-                this.shards.insert(command.get(1).asString().?.hash());
+                this.acquired[this.command_count].hash = command.get(1).asString().?.hash();
                 this.commands[this.command_count] = command;
                 this.command_count += 1;
                 return false;
@@ -149,13 +126,13 @@ pub const MultiState = struct {
                 if (command.length != 3) return error.InvalidArgumentCount;
                 if (command.get(1).asString() == null) return error.InvalidArguments;
                 if (command.get(2).asString() == null) return error.InvalidArguments;
-                this.shards.insert(command.get(1).asString().?.hash());
+                this.acquired[this.command_count].hash = command.get(1).asString().?.hash();
                 this.commands[this.command_count] = command;
                 this.command_count += 1;
                 return false;
             } else if (std.mem.eql(u8, slice_view, "EXEC")) {
-                this.shards.sort();
                 command.deinit(this.allocator);
+                this.acquiremachine = this.data.multi_acquire(this.command_count, &this.acquired);
                 return true;
             }
             return error.UnsupportedCommand;
@@ -169,10 +146,10 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
         if (s.release) {
             // Step 3: Release all the shards held by the transaction
             //
-            for (0..s.shards_acquired) |i| {
-                if (s.acquired[i]) |locked| {
-                    locked.lock.unlock();
-                }
+            var shard: usize = 0;
+            while (s.acquired[shard].lock) |acquired| : (shard += 1) {
+                if (shard > 0 and s.acquired[shard - 1].lock.? == acquired) continue;
+                acquired.unlock();
             }
 
             for (0..s.commands_executed) |i| {
@@ -230,26 +207,24 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
         } else if (s.acquiremachine) |*acquiremachine| {
             // Step 1.1: Run the shard acquiring machine
             //
-            if (acquiremachine.drive()) |result| {
-                s.acquired[s.shards_acquired] = result;
-                s.shards_acquired += 1;
+            if (acquiremachine.drive()) |_| {
+                s.shards_acquired = s.command_count;
                 s.acquiremachine = null;
-                return .Incomplete;
+                return drive(s);
             }
             return .Incomplete;
-        } else if (s.shards_acquired < s.shards.count) {
-            // Step 1: Acquire all shards
-            //
-            var command = s.shards.shards[s.shards_acquired];
-            s.acquiremachine = s.data.multi_acquire(command, s.acquired[0..s.shards_acquired]);
-            return drive(s);
-        } else if (s.splitmachine) |*split_machine| {
+        }
+        if (s.splitmachine) |*split_machine| {
             // Step 2.1 Split the map we want to insert into
             //
             if (split_machine.drive()) |whoops_acquired| {
-                s.acquired[s.shards_acquired] = whoops_acquired;
+                s.acquired[s.shards_acquired] = map.ExtendibleMap.MAcquireItem{
+                    .hash = 0,
+                    .lock = whoops_acquired.lock,
+                };
                 s.shards_acquired += 1;
                 s.splitmachine = null;
+                return drive(s);
             }
             return .Incomplete;
         } else if (s.commands_executed < s.command_count) {
@@ -282,13 +257,13 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                     map.SmallMap.Result.Split => {
                         if (s.data.split(shash, small_map, s.allocator)) |split_machine| {
                             s.splitmachine = split_machine;
-                            return .Incomplete;
+                            return drive(s);
                         } else {
                             s.rollback = true;
-                            return drive(s);
                         }
                     },
                 }
+                return drive(s);
             } else {
                 s.commands_executed += 1;
             }
