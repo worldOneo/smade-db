@@ -83,8 +83,9 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 if (s.client.invalid) {
                     return .{ .Complete = {} };
                 }
+                s.calls = 0;
             }
-            if (s.calls > 16) {
+            if (s.calls > 8) {
                 return .Incomplete; // thats it, budget well spent
             }
             _ = drive(s);
