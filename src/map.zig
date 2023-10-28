@@ -209,6 +209,12 @@ fn Bucket() type {
         const shifts_clz_vec = @Vector(bucketSize, u16){ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
         const clz_vec = @as(@Vector(bucketSize, u16), @splat(1)) << shifts_clz_vec;
 
+        const shifts_clz_lower_vec = @Vector(8, u16){ 15, 14, 13, 12, 11, 10, 9, 8 };
+        const clz_lower_vec = @as(@Vector(8, u16), @splat(1)) << shifts_clz_lower_vec;
+
+        const shifts_clz_upper_vec = @Vector(8, u16){ 7, 6, 5, 4, 3, 2, 1, 0 };
+        const clz_upper_vec = @as(@Vector(8, u16), @splat(1)) << shifts_clz_upper_vec;
+
         const hash_mask: u16 = (1 << 15) - 1;
         const present_mask: u16 = 1 << 15;
         const hash_mask_vec: @Vector(bucketSize, u16) = @splat(hash_mask);
@@ -312,7 +318,68 @@ fn Bucket() type {
             return null;
         }
 
-        fn updateOrCreate(this: *This, hash: u64, key: string.String, now: u32) SmallMap.Result {
+        inline fn expiryClzIdx(expiries: @Vector(8, u32), now: u32, comptime clz: @Vector(8, u16)) u16 {
+            const zeroes8_vec: @Vector(8, u32) = @splat(0);
+            const now_vec: @Vector(8, u32) = @splat(now);
+            const lt_vec = @select(u16, expiries < now_vec, clz, zeroes8_vec);
+            const u32_zero_vec: @Vector(8, u32) = @splat(0);
+            const neqz_vec = @select(u16, expiries != u32_zero_vec, clz, zeroes8_vec);
+            return @reduce(.Or, lt_vec & neqz_vec);
+        }
+
+        fn removeExpired(this: *This, cclz_idx: u16, allocator: *alloc.LocalAllocator) u32 {
+            var clz_idx = cclz_idx;
+            const one: u16 = 1;
+            var freed = @popCount(cclz_idx);
+
+            while (clz_idx != 0) {
+                const idx = @clz(clz_idx);
+                clz_idx ^= (one << 15) >> @intCast(idx); // unset bit
+                this.metadatas[idx] = 0;
+                this.expiry[idx] = 0;
+                this.entries[idx].key.deinit(allocator);
+                this.entries[idx].value.deinit(allocator);
+            }
+            return freed;
+        }
+
+        fn compress(this: *This, now: u32, allocator: *alloc.LocalAllocator) u32 {
+            const expiriesa = @Vector(8, u32){
+                this.expiry[0],
+                this.expiry[1],
+                this.expiry[2],
+                this.expiry[3],
+                this.expiry[4],
+                this.expiry[5],
+                this.expiry[6],
+                this.expiry[7],
+            };
+
+            const expiriesb = @Vector(8, u32){
+                this.expiry[8],
+                this.expiry[9],
+                this.expiry[10],
+                this.expiry[11],
+                this.expiry[12],
+                this.expiry[13],
+                this.expiry[14],
+                this.expiry[15],
+            };
+            const freeda = this.removeExpired(expiryClzIdx(expiriesa, now, clz_lower_vec), allocator);
+            const freedb = this.removeExpired(expiryClzIdx(expiriesb, now, clz_upper_vec), allocator);
+            return freeda + freedb;
+        }
+
+        // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
+        // if Result.Split the key is owned by caller and nothing has been changed
+        fn updateOrCreate(this: *This, hash: u64, key: string.String, now: u32, la: *alloc.LocalAllocator) SmallMap.Result {
+            const attempt = this.updateOrCreate0(hash, key, now);
+            if (attempt != .Split) return attempt;
+            if (this.compress(now, la) == 0) return .Split;
+            return this.updateOrCreate(hash, key, now, la);
+        }
+
+        fn updateOrCreate0(this: *This, hash: u64, key: string.String, now: u32) SmallMap.Result {
             const maybe_idx = this.findIdxOf(hash, &key);
             if (maybe_idx) |idx| {
                 if (this.expiry[idx] == 0 or this.expiry[idx] > now) {
@@ -383,11 +450,11 @@ pub const SmallMap = struct {
 
     // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
     // if Result.Split the key is owned by caller and nothing has been changed
-    pub fn updateOrCreate(this: *This, hash: u64, key: string.String, now: u32) Result {
+    pub fn updateOrCreate(this: *This, hash: u64, key: string.String, now: u32, allocator: *alloc.LocalAllocator) Result {
         const shifted_hash = hash >> this.level;
         const bucket_index = bucketIndex(shifted_hash);
         const bucket = &this.entries[bucket_index];
-        return bucket.updateOrCreate(shifted_hash, key, now);
+        return bucket.updateOrCreate(shifted_hash, key, now, allocator);
     }
 
     pub fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?*const Value {
@@ -404,7 +471,7 @@ pub const SmallMap = struct {
         return bucket.delete(shifted_hash, key, now);
     }
 
-    fn fillFromSplit(this: *This, data: *This, bit: u16, now: u32) void {
+    fn fillFromSplit(this: *This, data: *This, bit: u16, now: u32, la: *alloc.LocalAllocator) void {
         const one: u16 = 1;
         var inserted: usize = 0;
         for (0..bucketCount) |i| {
@@ -418,7 +485,7 @@ pub const SmallMap = struct {
                 inserted += 1;
                 const hash = entry.key.hash();
 
-                switch (this.updateOrCreate(hash, entry.key, now)) {
+                switch (this.updateOrCreate(hash, entry.key, now, la)) {
                     Result.Absent => |v| {
                         v.value.* = entry.value;
                         v.expires.* = bucket.expiry[idx];
@@ -828,9 +895,9 @@ pub const ExtendibleMap = struct {
         second_map.version.store(0, std.atomic.Ordering.Monotonic);
         second_map.value.clear(next_level);
 
-        small_map.fillFromSplit(&tmp, 0, 0);
+        small_map.fillFromSplit(&tmp, 0, 0, allocator);
         var second: *SmallMap = &second_map.value;
-        second.fillFromSplit(&tmp, 1, 0);
+        second.fillFromSplit(&tmp, 1, 0, allocator);
         while (second_map.tryLock() == null) {
             // this isn't bussy as tryLock is uncontendet
         }
@@ -952,7 +1019,7 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
     pub fn drive(s: *InsertAndSplitState) Drive {
         if (s.acquiremachine) |*acquire| {
             if (acquire.drive()) |acquired| {
-                switch (acquired.map.updateOrCreate(s.key.hash(), s.key, 0)) {
+                switch (acquired.map.updateOrCreate(s.key.hash(), s.key, 0, s.allocator)) {
                     SmallMap.Result.Present => |ptr| return Drive{ .Complete = .{
                         .present = true,
                         .value = ptr.value,
@@ -1192,7 +1259,7 @@ test "map.ExtendibleMap single" {
         while (true) {
             var acquire_machine = map.acquire(h);
             var m: ExtendibleMap.AcquireResult = acquire_machine.run();
-            switch (m.map.updateOrCreate(h, k, 0)) {
+            switch (m.map.updateOrCreate(h, k, 0, &la)) {
                 SmallMap.Result.Present => unreachable,
                 SmallMap.Result.Absent => |ptr| {
                     ptr.value.* = Value.fromString(k);
@@ -1245,7 +1312,8 @@ test "map.ExtendibleMap single" {
 
 test "map.SmallMap split" {
     const expect = std.testing.expect;
-
+    var ga = try alloc.GlobalAllocator.init(1, std.heap.page_allocator);
+    var la = alloc.LocalAllocator.init(&ga);
     var i: usize = 0;
     while (i < 1_000_000) {
         var a: SmallMap = undefined;
@@ -1253,7 +1321,7 @@ test "map.SmallMap split" {
         const start = i;
         while (true) : (i += 1) {
             var k = string.String.fromInt(@intCast(i));
-            if (a.updateOrCreate(k.hash(), k, 0) == SmallMap.Result.Split) {
+            if (a.updateOrCreate(k.hash(), k, 0, &la) == SmallMap.Result.Split) {
                 break;
             }
         }
@@ -1261,8 +1329,8 @@ test "map.SmallMap split" {
         var c: SmallMap = undefined;
         b.clear(1);
         c.clear(1);
-        b.fillFromSplit(&a, 0, 0);
-        c.fillFromSplit(&a, 1, 0);
+        b.fillFromSplit(&a, 0, 0, &la);
+        c.fillFromSplit(&a, 1, 0, &la);
 
         for (start..i) |check| {
             var k = string.String.fromInt(@intCast(check));
@@ -1276,6 +1344,8 @@ test "map.SmallMap split" {
 
 test "map.SmallMap.basic" {
     const expect = std.testing.expect;
+    var ga = try alloc.GlobalAllocator.init(1, std.heap.page_allocator);
+    var la = alloc.LocalAllocator.init(&ga);
 
     var a: SmallMap = undefined;
     a.clear(0);
@@ -1286,7 +1356,7 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = k;
-        switch (a.updateOrCreate(k.hash(), k, 0)) {
+        switch (a.updateOrCreate(k.hash(), k, 0, &la)) {
             SmallMap.Result.Absent => |ptr| ptr.value.* = Value.fromString(v),
             else => unreachable,
         }
@@ -1296,7 +1366,7 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
-        switch (a.updateOrCreate(k.hash(), k, 0)) {
+        switch (a.updateOrCreate(k.hash(), k, 0, &la)) {
             SmallMap.Result.Present => |ptr| {
                 const as_str = ptr.value.asString() orelse unreachable;
                 try expect(as_str.eql(&k));

@@ -183,7 +183,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                     const shash = str.hash();
                     var small_map = s.data.multi_get_map(shash);
                     if (v.asString()) |str_val| {
-                        var res = small_map.updateOrCreate(shash, str.*, 0);
+                        var res = small_map.updateOrCreate(shash, str.*, 0, s.allocator);
                         switch (res) {
                             map.SmallMap.Result.Present => |val| {
                                 val.value.deinit(s.allocator);
@@ -241,7 +241,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
             //
             // It is not about what is done, but what could be done...
             if (std.mem.eql(u8, execute.sliceView(), "SET")) {
-                var res = small_map.updateOrCreate(shash, str.*, 0);
+                var res = small_map.updateOrCreate(shash, str.*, 0, s.allocator);
                 switch (res) {
                     map.SmallMap.Result.Present => |val| {
                         s.rollbacks[s.command_count] = val.value.*;

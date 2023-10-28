@@ -174,6 +174,7 @@ pub const String = struct {
             var thisLarge: *LargeString = @ptrCast(this);
             allocator.freeSlice(u8, thisLarge.data[0..thisLarge.capacity]);
         }
+        this.* = empty();
     }
 
     pub fn hash(this: *const This) u64 {
