@@ -186,6 +186,23 @@ pub const String = struct {
         new.append(this.sliceView(), allocator) orelse return null;
         return new;
     }
+
+    pub fn toInt(this: *const This) ?i64 {
+        var base: i64 = 0;
+        var sign: i64 = 1;
+        var slice = this.sliceView();
+        var ptr: usize = 0;
+        if (slice.len == 0) return null;
+        if (slice[0] == '-') {
+            sign = -1;
+            ptr += 1;
+        }
+        while (ptr < slice.len) : (ptr += 1) {
+            base *= 10;
+            base += @intCast(slice[ptr] - '0');
+        }
+        return base * sign;
+    }
 };
 
 test "string.String" {

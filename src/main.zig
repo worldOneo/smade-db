@@ -16,6 +16,7 @@ const ExecutionState = struct {
     transaction_prep: usize = 0,
     donothing: bool = false,
     calls: usize = 0,
+    now: u32,
 };
 
 pub fn transactionInt(machine: *ExecutionMachine) u64 {
@@ -139,15 +140,19 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                         }
 
                         _ = s.client.sendbuffer.push("+QUEUED\r\n");
-                        return drive(s);
+                        const res = drive(s);
+                        s.donothing = false;
+                        return res;
                     } else if (std.mem.eql(u8, f_str.sliceView(), "MULTI")) {
                         // Begin transaction
                         if (s.allocator.allocate(commands.MultiMachine)) |machine| {
                             s.transaction_prep = 1;
-                            machine.state = commands.MultiState.init(s.allocator, s.data);
+                            machine.state = commands.MultiState.init(s.allocator, s.data, s.now);
                             s.transaction = machine;
                             _ = s.client.sendbuffer.push("+OK\r\n");
-                            return drive(s);
+                            const res = drive(s);
+                            s.donothing = false;
+                            return res;
                         } else {
                             _ = s.client.sendbuffer.push("-OOM\r\n");
                             return .Incomplete;
@@ -159,7 +164,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 defer vv.value.deinit(s.allocator);
                 var vlist = list;
 
-                if (commands.CommandState.init(s.data, vlist, s.allocator)) |comm_state| {
+                if (commands.CommandState.init(s.data, vlist, s.now, s.allocator)) |comm_state| {
                     const command = commands.CommandMachine.init(comm_state);
                     s.command = command;
                     return drive(s);
@@ -276,6 +281,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
     std.debug.print("#{} Ring started\n", .{worker_id});
     var wstatus = WorkerStatus{};
     var cansleep = true;
+    var now: u32 = @intCast(std.time.timestamp());
 
     while (true) {
         // report the worker status in an atomic int
@@ -286,6 +292,8 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
             std.debug.print("#{} Failed to submit ring = {s}\n", .{ worker_id, @errorName(err) });
             continue;
         };
+
+        now = @intCast(std.time.timestamp());
 
         // Process IO events
         while (iterator.next() catch |err| {
@@ -302,6 +310,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                         .allocator = &la,
                         .client = item,
                         .data = data,
+                        .now = now,
                     });
                 } else {
                     ring.close(item) catch |err| {
@@ -324,6 +333,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                             .allocator = &la,
                             .client = item,
                             .data = data,
+                            .now = now,
                         });
                         recreateTransaction(&node.task, txdata);
                     } else {
@@ -338,6 +348,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
                     .allocator = &la,
                     .client = item,
                     .data = data,
+                    .now = now,
                 });
                 recreateTransaction(&tmp, item.userdata);
                 if (tmp.state.transaction) |tx| {

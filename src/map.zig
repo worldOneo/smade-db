@@ -988,8 +988,9 @@ pub fn FixedSizedQueue(comptime T: type, comptime Size: usize) type {
 }
 
 pub const InsertAndSplitState = struct {
-    pub fn init(key: string.String, map: *ExtendibleMap, lalloc: *alloc.LocalAllocator) @This() {
+    pub fn init(key: string.String, map: *ExtendibleMap, now: u32, lalloc: *alloc.LocalAllocator) @This() {
         return .{
+            .time = now,
             .key = key,
             .map = map,
             .allocator = lalloc,
@@ -998,6 +999,7 @@ pub const InsertAndSplitState = struct {
         };
     }
 
+    time: u32,
     key: string.String,
     map: *ExtendibleMap,
     allocator: *alloc.LocalAllocator,
@@ -1011,6 +1013,7 @@ pub const InsertAndSplitState = struct {
 pub const InsertAndSplitResult = struct {
     present: bool,
     value: *Value,
+    expires: *u32,
     acquired: ExtendibleMap.AcquireResult,
 };
 
@@ -1019,17 +1022,28 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
     pub fn drive(s: *InsertAndSplitState) Drive {
         if (s.acquiremachine) |*acquire| {
             if (acquire.drive()) |acquired| {
-                switch (acquired.map.updateOrCreate(s.key.hash(), s.key, 0, s.allocator)) {
+                switch (acquired.map.updateOrCreate(s.key.hash(), s.key, s.time, s.allocator)) {
                     SmallMap.Result.Present => |ptr| return Drive{ .Complete = .{
                         .present = true,
                         .value = ptr.value,
+                        .expires = ptr.expires,
                         .acquired = acquired,
                     } },
                     SmallMap.Result.Absent => |ptr| return Drive{ .Complete = .{
                         .present = false,
                         .value = ptr.value,
+                        .expires = ptr.expires,
                         .acquired = acquired,
                     } },
+                    SmallMap.Result.Expired => |val| {
+                        val.value.deinit(s.allocator);
+                        return Drive{ .Complete = .{
+                            .present = false,
+                            .value = val.value,
+                            .expires = val.expires,
+                            .acquired = acquired,
+                        } };
+                    },
                     SmallMap.Result.Split => {
                         s.splitmachine = .{
                             .smallmap = acquired.lock,
@@ -1038,7 +1052,6 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
                         s.acquiremachine = null;
                         return drive(s);
                     },
-                    else => unreachable,
                 }
             }
             return .Incomplete;

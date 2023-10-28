@@ -9,6 +9,7 @@ const std = @import("std");
 const GetState = struct {
     key: string.String,
     hash: u64,
+    now: u32,
     allocator: *alloc.LocalAllocator,
     read: ?string.String = null,
 };
@@ -32,7 +33,7 @@ const GetCreator = state.Creator(GetMachine, GetMachine, struct {
 const GetMachine = state.DepMachine(GetState, GetResult, *const map.SmallMap, struct {
     const Drive = state.Drive(GetResult);
     pub fn drive(s: *GetState, dep: *const map.SmallMap) Drive {
-        var maybe_val = dep.get(s.hash, &s.key, 0);
+        var maybe_val = dep.get(s.hash, &s.key, s.now);
         if (maybe_val) |val| {
             if (val.asConstString()) |str| {
                 const clone = str.clone(s.allocator) orelse return Drive{ .Complete = error.OutOfMemory };
@@ -53,6 +54,7 @@ const ExGetMachine = map.ExtendibleMap.ReadMachine(GetMachine, GetCreator, GetRe
 
 const SetState = struct {
     value: map.Value,
+    expire: u32,
     ins_spl_machine: map.InsertAndSplitMachine,
 };
 
@@ -67,6 +69,7 @@ const SetMachine = state.Machine(SetState, SetResult, struct {
                 var value: map.InsertAndSplitResult = c_value;
                 var old = value.value.*;
                 value.value.* = s.value;
+                value.expires.* = s.expire;
                 value.acquired.lock.unlock();
                 if (!c_value.present) {
                     return Drive{ .Complete = map.Value.nil() };
@@ -88,7 +91,10 @@ pub const MultiState = struct {
 
     acquired: [MaxShards]map.ExtendibleMap.MAcquireItem = [_]map.ExtendibleMap.MAcquireItem{.{ .hash = 0, .lock = null }} ** MaxShards,
     commands: [MaxShards]resp.RespList = undefined,
-    rollbacks: [MaxShards]?map.Value = [_]?map.Value{null} ** MaxShards,
+    rollbacks: [MaxShards]?struct {
+        value: map.Value,
+        expires: u32,
+    } = .{null} ** MaxShards,
     rollback: bool = false,
     release: bool = false,
     command_count: usize = 0,
@@ -97,13 +103,15 @@ pub const MultiState = struct {
 
     splitmachine: ?map.ExtendibleMap.SplitMachine = null,
     acquiremachine: ?map.ExtendibleMap.MAcquireMachine = null,
+    now: u32,
 
     const This = @This();
 
-    pub fn init(la: *alloc.LocalAllocator, data: *map.ExtendibleMap) This {
+    pub fn init(la: *alloc.LocalAllocator, data: *map.ExtendibleMap, now: u32) This {
         return .{
             .allocator = la,
             .data = data,
+            .now = now,
         };
     }
 
@@ -126,6 +134,15 @@ pub const MultiState = struct {
                 if (command.length != 3) return error.InvalidArgumentCount;
                 if (command.get(1).asString() == null) return error.InvalidArguments;
                 if (command.get(2).asString() == null) return error.InvalidArguments;
+                this.acquired[this.command_count].hash = command.get(1).asString().?.hash();
+                this.commands[this.command_count] = command;
+                this.command_count += 1;
+                return false;
+            } else if (std.mem.eql(u8, slice_view, "SETEX")) {
+                if (command.length != 4) return error.InvalidArgumentCount;
+                if (command.get(1).asString() == null) return error.ExpectedKeyAsStr;
+                if (command.get(2).asString() == null or command.get(2).asString().?.toInt() == null) return error.ExpectedExpiryAsInt;
+                if (command.get(3).asString() == null) return error.ExpectedValAsStr;
                 this.acquired[this.command_count].hash = command.get(1).asString().?.hash();
                 this.commands[this.command_count] = command;
                 this.command_count += 1;
@@ -155,7 +172,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
             for (0..s.commands_executed) |i| {
                 if (s.rollbacks[i]) |v| {
                     var vv = v;
-                    vv.deinit(s.allocator);
+                    vv.value.deinit(s.allocator);
                 }
             }
 
@@ -182,8 +199,8 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                     var str = command.get(1).asString().?;
                     const shash = str.hash();
                     var small_map = s.data.multi_get_map(shash);
-                    if (v.asString()) |str_val| {
-                        var res = small_map.updateOrCreate(shash, str.*, 0, s.allocator);
+                    if (v.value.asString()) |str_val| {
+                        var res = small_map.updateOrCreate(shash, str.*, s.now, s.allocator);
                         switch (res) {
                             map.SmallMap.Result.Present => |val| {
                                 val.value.deinit(s.allocator);
@@ -195,8 +212,8 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                         }
                         command.get(1).* = resp.RespValue.from({});
                         command.deinit(s.allocator);
-                    } else if (!v.isPresent()) {
-                        if (small_map.delete(shash, str, 0)) |cold| {
+                    } else if (!v.value.isPresent()) {
+                        if (small_map.delete(shash, str, s.now)) |cold| {
                             var old = cold;
                             old.entry.key.deinit(s.allocator);
                             old.entry.value.deinit(s.allocator);
@@ -240,19 +257,37 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
             // currently only SET supported in multi.
             //
             // It is not about what is done, but what could be done...
-            if (std.mem.eql(u8, execute.sliceView(), "SET")) {
+            if (std.mem.eql(u8, execute.sliceView(), "SET") or std.mem.eql(u8, execute.sliceView(), "SETEX")) {
                 var res = small_map.updateOrCreate(shash, str.*, 0, s.allocator);
+                var expires: u32 = 0;
+                var val_idx: usize = 2;
+                if (std.mem.eql(u8, execute.sliceView(), "SETEX")) {
+                    expires = @intCast(command.get(2).asString().?.toInt().?);
+                    expires += s.now;
+                    val_idx = 3;
+                }
                 switch (res) {
                     map.SmallMap.Result.Present => |val| {
-                        s.rollbacks[s.command_count] = val.value.*;
-                        val.value.* = map.Value.fromString(command.get(2).asString().?.*);
-                        command.get(2).* = resp.RespValue.from({});
+                        s.rollbacks[s.command_count] = .{
+                            .value = val.value.*,
+                            .expires = val.expires.*,
+                        };
+                        val.value.* = map.Value.fromString(command.get(val_idx).asString().?.*);
+                        val.expires.* = expires;
                         s.commands_executed += 1;
                     },
                     map.SmallMap.Result.Absent => |val| {
-                        s.rollbacks[s.command_count] = map.Value.nil();
-                        val.value.* = map.Value.fromString(command.get(2).asString().?.*);
-                        command.get(2).* = resp.RespValue.from({});
+                        s.rollbacks[s.command_count] = null;
+                        val.value.* = map.Value.fromString(command.get(val_idx).asString().?.*);
+                        val.expires.* = expires;
+                        command.get(val_idx).* = resp.RespValue.from({});
+                        s.commands_executed += 1;
+                    },
+                    map.SmallMap.Result.Expired => |val| {
+                        s.rollbacks[s.command_count] = null;
+                        val.value.deinit(s.allocator);
+                        val.value.* = map.Value.fromString(command.get(val_idx).asString().?.*);
+                        val.expires.* = expires;
                         s.commands_executed += 1;
                     },
                     map.SmallMap.Result.Split => {
@@ -263,7 +298,6 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                             s.rollback = true;
                         }
                     },
-                    map.SmallMap.Result.Expired => unreachable,
                 }
                 return drive(s);
             } else {
@@ -290,13 +324,16 @@ pub const CommandError = error{
     InvalidArguments,
     TypeNotTrivialReadable,
     OutOfMemory,
+    ExpectedValToBeString,
+    ExpectedKeyToBeString,
+    ExpectedExpireToBeInt,
 };
 
 pub const CommandState = union(enum) {
     Set: SetMachine,
     Get: ExGetMachine,
 
-    pub fn init(data: *map.ExtendibleMap, command: *resp.RespList, la: *alloc.LocalAllocator) CommandError!CommandState {
+    pub fn init(data: *map.ExtendibleMap, command: *resp.RespList, now: u32, la: *alloc.LocalAllocator) !CommandState {
         if (command.length < 2) {
             return error.InvalidArgumentCount;
         }
@@ -320,27 +357,41 @@ pub const CommandState = union(enum) {
                             .allocator = la,
                             .hash = hash,
                             .key = key,
+                            .now = now,
                         })),
                     ),
                 };
-            } else if (std.mem.eql(u8, slice_view, "SET")) {
-                if (command.length != 3) return error.InvalidArgumentCount;
+            } else if (std.mem.eql(u8, slice_view, "SET") or std.mem.eql(u8, slice_view, "SETEX")) {
+                const cmd_len: usize = if (std.mem.eql(u8, slice_view, "SETEX")) 4 else 3;
+                if (command.length != cmd_len) return error.InvalidArgumentCount;
                 var key: string.String = string.String.empty();
                 var value: string.String = string.String.empty();
-                if (command.get(1).asString()) |key_str| key = key_str.* else return error.InvalidArguments;
-                if (command.get(2).asString()) |val_str| value = val_str.* else return error.InvalidArguments;
+                var expires: u32 = 0;
+                var val_idx: usize = 2;
+                if (std.mem.eql(u8, slice_view, "SETEX")) {
+                    if (command.get(2).asString()) |val| {
+                        expires = @intCast(val.toInt() orelse return error.ExpectedExpireToBeInt);
+                        expires += now;
+                    } else return error.ExpectedExpireToBeInt;
+                    val_idx = 3;
+                }
+
+                if (command.get(1).asString()) |key_str| key = key_str.* else return error.ExpectedKeyToBeString;
+                if (command.get(val_idx).asString()) |val_str| value = val_str.* else return error.ExpectedValToBeString;
                 command.get(1).* = resp.RespValue.from({});
-                command.get(2).* = resp.RespValue.from({});
+                command.get(val_idx).* = resp.RespValue.from({});
 
                 const insState = map.InsertAndSplitState.init(
                     key,
                     data,
+                    now,
                     la,
                 );
                 return CommandState{
                     .Set = SetMachine.init(SetState{
                         .value = map.Value.fromString(value),
                         .ins_spl_machine = map.InsertAndSplitMachine.init(insState),
+                        .expire = expires,
                     }),
                 };
             }
