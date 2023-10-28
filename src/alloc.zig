@@ -312,6 +312,9 @@ const SizeClass = struct {
             page.collect();
 
             if (page.isPageUnused()) {
+                if (page.next_page == null) {
+                    return page.allocate(T, n);
+                }
                 allocLog("thread {} allocating slow in size class {*} freeing page {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // return this page for reuse anywhere else
                 this.unlinkPage(page);

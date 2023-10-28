@@ -89,9 +89,6 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 return .Incomplete; // thats it, budget well spent
             }
             _ = drive(s);
-            if (s.client.invalid) {
-                return .{ .Complete = {} };
-            }
             s.donothing = false;
             return .Incomplete;
         }

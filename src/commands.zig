@@ -32,7 +32,7 @@ const GetCreator = state.Creator(GetMachine, GetMachine, struct {
 const GetMachine = state.DepMachine(GetState, GetResult, *const map.SmallMap, struct {
     const Drive = state.Drive(GetResult);
     pub fn drive(s: *GetState, dep: *const map.SmallMap) Drive {
-        var maybe_val = dep.get(s.hash, &s.key);
+        var maybe_val = dep.get(s.hash, &s.key, 0);
         if (maybe_val) |val| {
             if (val.asConstString()) |str| {
                 const clone = str.clone(s.allocator) orelse return Drive{ .Complete = error.OutOfMemory };
@@ -183,22 +183,23 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                     const shash = str.hash();
                     var small_map = s.data.multi_get_map(shash);
                     if (v.asString()) |str_val| {
-                        var res = small_map.updateOrCreate(shash, str.*);
+                        var res = small_map.updateOrCreate(shash, str.*, 0);
                         switch (res) {
                             map.SmallMap.Result.Present => |val| {
-                                val.deinit(s.allocator);
-                                val.* = map.Value.fromString(str_val.*);
+                                val.value.deinit(s.allocator);
+                                val.value.* = map.Value.fromString(str_val.*);
                             },
                             map.SmallMap.Result.Absent => unreachable,
                             map.SmallMap.Result.Split => unreachable,
+                            map.SmallMap.Result.Expired => unreachable,
                         }
                         command.get(1).* = resp.RespValue.from({});
                         command.deinit(s.allocator);
                     } else if (!v.isPresent()) {
-                        if (small_map.delete(shash, str)) |cold| {
+                        if (small_map.delete(shash, str, 0)) |cold| {
                             var old = cold;
-                            old.key.deinit(s.allocator);
-                            old.value.deinit(s.allocator);
+                            old.entry.key.deinit(s.allocator);
+                            old.entry.value.deinit(s.allocator);
                         }
                         command.deinit(s.allocator);
                     }
@@ -240,17 +241,17 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
             //
             // It is not about what is done, but what could be done...
             if (std.mem.eql(u8, execute.sliceView(), "SET")) {
-                var res = small_map.updateOrCreate(shash, str.*);
+                var res = small_map.updateOrCreate(shash, str.*, 0);
                 switch (res) {
                     map.SmallMap.Result.Present => |val| {
-                        s.rollbacks[s.command_count] = val.*;
-                        val.* = map.Value.fromString(command.get(2).asString().?.*);
+                        s.rollbacks[s.command_count] = val.value.*;
+                        val.value.* = map.Value.fromString(command.get(2).asString().?.*);
                         command.get(2).* = resp.RespValue.from({});
                         s.commands_executed += 1;
                     },
                     map.SmallMap.Result.Absent => |val| {
                         s.rollbacks[s.command_count] = map.Value.nil();
-                        val.* = map.Value.fromString(command.get(2).asString().?.*);
+                        val.value.* = map.Value.fromString(command.get(2).asString().?.*);
                         command.get(2).* = resp.RespValue.from({});
                         s.commands_executed += 1;
                     },
@@ -262,6 +263,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                             s.rollback = true;
                         }
                     },
+                    map.SmallMap.Result.Expired => unreachable,
                 }
                 return drive(s);
             } else {

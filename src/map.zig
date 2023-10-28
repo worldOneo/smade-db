@@ -13,6 +13,7 @@ const ValueTag = enum(usize) {
 
 const ComplexValueTag = enum(usize) {
     Nil = 0b1,
+    LongInt = 0b0,
 };
 
 const List = struct {
@@ -90,12 +91,16 @@ pub const Value = struct {
 
     const This = @This();
 
-    pub fn nil() This {
+    fn withLastByte(last: u8) This {
         var inner = [3]usize{ 0, 0, 0 };
         var sms = @as(*[24]u8, @ptrCast(&inner));
-        sms[23] = 0b111;
+        sms[23] = last;
         const value = This{ .value = inner };
         return value;
+    }
+
+    pub fn nil() This {
+        return withLastByte(0b111);
     }
 
     pub fn tag(this: *const This) ValueTag {
@@ -123,6 +128,12 @@ pub const Value = struct {
         return .{ .value = @as(*[3]usize, @ptrCast(&str)).* };
     }
 
+    pub fn fromInt(int: u64) Value {
+        var this = withLastByte(0b11);
+        this.value[0] = int;
+        return this;
+    }
+
     fn constCast(comptime Result: type, comptime Fn: *const fn (*This) ?*Result) *const fn (*const This) ?*const Result {
         return struct {
             fn cast(this: *const This) ?*const Result {
@@ -147,6 +158,13 @@ pub const Value = struct {
         return null;
     }
 
+    pub fn asLongInt(this: *This) ?u64 {
+        if (this.complexTag() == .LongInt) {
+            return this.value[0];
+        }
+        return null;
+    }
+
     pub fn asConstList(this: *const This) ?*const List {
         return constCast(List, asList)(this);
     }
@@ -165,6 +183,7 @@ pub const Value = struct {
         } else if (this.asString()) |str| {
             str.deinit(la);
         }
+        this.* = nil();
     }
 };
 
@@ -176,290 +195,234 @@ pub const Entry = struct {
     }
 };
 
-const smallMapEntries: usize = 302; // a nice number which fits into one allocator page, consider 601, 509, 251, or 127
+fn Bucket() type {
+    const bucketSize = 16;
+    return struct {
+        expire_items: usize = 0,
+        metadatas: [bucketSize]u16,
+        expiry: [bucketSize]u32,
+        entries: [bucketSize]Entry,
+
+        const This = @This();
+
+        // leading zeroes = index
+        const shifts_clz_vec = @Vector(bucketSize, u16){ 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0 };
+        const clz_vec = @as(@Vector(bucketSize, u16), @splat(1)) << shifts_clz_vec;
+
+        const hash_mask: u16 = (1 << 15) - 1;
+        const present_mask: u16 = 1 << 15;
+        const hash_mask_vec: @Vector(bucketSize, u16) = @splat(hash_mask);
+        const zeroes: @Vector(bucketSize, u16) = @splat(0);
+
+        fn clear(this: *This) void {
+            for (0..bucketSize) |i| {
+                this.metadatas[i] = 0;
+            }
+        }
+
+        inline fn hasSpace(this: *const This) bool {
+            const meta_vec = @Vector(bucketSize, u16){
+                this.metadatas[0],
+                this.metadatas[1],
+                this.metadatas[2],
+                this.metadatas[3],
+                this.metadatas[4],
+                this.metadatas[5],
+                this.metadatas[6],
+                this.metadatas[7],
+                this.metadatas[8],
+                this.metadatas[9],
+                this.metadatas[10],
+                this.metadatas[11],
+                this.metadatas[12],
+                this.metadatas[13],
+                this.metadatas[14],
+                this.metadatas[15],
+            };
+            const present: @Vector(bucketSize, u16) = @splat(present_mask);
+            const meta_presents = meta_vec & present;
+            return @reduce(.Any, meta_presents == present);
+        }
+
+        inline fn metaClzIdxFast(this: *const This, mask: u16, eq: u16) u16 {
+            // a bit of SIMD to find the first indexes with a matching properties
+            const mask_vec: @Vector(bucketSize, u16) = @splat(mask);
+            const eq_vec: @Vector(bucketSize, u16) = @splat(eq);
+
+            const meta_vec = @Vector(bucketSize, u16){
+                this.metadatas[0],
+                this.metadatas[1],
+                this.metadatas[2],
+                this.metadatas[3],
+                this.metadatas[4],
+                this.metadatas[5],
+                this.metadatas[6],
+                this.metadatas[7],
+                this.metadatas[8],
+                this.metadatas[9],
+                this.metadatas[10],
+                this.metadatas[11],
+                this.metadatas[12],
+                this.metadatas[13],
+                this.metadatas[14],
+                this.metadatas[15],
+            };
+            const masked_meta_vec = meta_vec & mask_vec;
+            const eq_pred = masked_meta_vec == eq_vec;
+            const clz_idxs = @select(u16, eq_pred, clz_vec, zeroes);
+            const idxes = @reduce(.Or, clz_idxs);
+            return idxes;
+        }
+
+        fn findIdxOf(this: *const This, shifted_hash: u64, key: *const string.String) ?usize {
+            const one: u16 = 1;
+
+            var clz_access = this.metaClzIdxFast(hash_mask | present_mask, @as(u16, @intCast(shifted_hash & @as(u64, @intCast(hash_mask)))) | present_mask);
+            while (clz_access != 0) {
+                const idx: u16 = @clz(clz_access); // get set bit
+                clz_access ^= (one << 15) >> @intCast(idx); // unset bit
+                if (this.entries[idx].key.eql(key)) {
+                    return @intCast(idx);
+                }
+            }
+            return null;
+        }
+
+        fn presentSlots(this: *const This) u16 {
+            return this.metaClzIdxFast(present_mask, present_mask);
+        }
+
+        fn findEmptySlot(this: *const This) ?usize {
+            var clz_access = this.metaClzIdxFast(present_mask, 0);
+            if (clz_access == 0) {
+                return null;
+            }
+
+            const idx: u16 = @clz(clz_access); // get set bit
+            return @intCast(idx);
+        }
+
+        fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?*const Value {
+            const maybe_idx = this.findIdxOf(hash, key);
+            if (maybe_idx) |idx| {
+                if (this.expiry[idx] == 0 or this.expiry[idx] > now) {
+                    return &this.entries[idx].value;
+                }
+            }
+            return null;
+        }
+
+        fn updateOrCreate(this: *This, hash: u64, key: string.String, now: u32) SmallMap.Result {
+            const maybe_idx = this.findIdxOf(hash, &key);
+            if (maybe_idx) |idx| {
+                if (this.expiry[idx] == 0 or this.expiry[idx] > now) {
+                    return SmallMap.Result{ .Present = .{ .value = &this.entries[idx].value, .expires = &this.expiry[idx] } };
+                } else {
+                    return SmallMap.Result{ .Expired = .{ .value = &this.entries[idx].value, .expires = &this.expiry[idx] } };
+                }
+            }
+
+            const maybe_new_idx = this.findEmptySlot();
+            if (maybe_new_idx) |new_idx| {
+                this.entries[new_idx].key = key;
+                this.metadatas[new_idx] = present_mask | (@as(u16, @intCast(hash & hash_mask)));
+                return SmallMap.Result{ .Absent = .{ .value = &this.entries[new_idx].value, .expires = &this.expiry[new_idx] } };
+            }
+
+            return .Split;
+        }
+
+        fn delete(this: *This, hash: u64, key: *const string.String, now: u32) ?SmallMap.Deleted {
+            const maybe_idx = this.findIdxOf(hash, key);
+            if (maybe_idx) |idx| {
+                const res = SmallMap.Deleted{
+                    .entry = this.entries[idx],
+                    .expired = !(this.expiry[idx] == 0 or this.expiry[idx] > now),
+                };
+                this.expiry[idx] = 0;
+                this.metadatas[idx] = 0;
+                return res;
+            }
+            return null;
+        }
+    };
+}
 
 pub const SmallMap = struct {
-    level: u8,
+    const bucketCount = 18;
+    level: u6,
     size: u16,
-    free_idx_count: usize,
-    free_idx: [smallMapEntries]u16,
-    metadata: [smallMapEntries]u32,
-    entries: [smallMapEntries]Entry,
+    entries: [bucketCount]Bucket(),
 
     const This = @This();
 
-    const presentMask: u32 = 1 << 31;
-    const distanceMask: u32 = 0b1111 << 27;
-    const idxMask: u32 = 0b1111111111 << 17;
-    const hashMask: u32 = (~(presentMask | distanceMask | idxMask));
-    const maxDist: u32 = 15;
-
-    fn isMetaPresent(metadata: u64) bool {
-        return metadata & presentMask == presentMask;
-    }
-
-    fn distanceOfMeta(metadata: u32) u32 {
-        return (metadata & distanceMask) >> 27;
-    }
-
-    fn hashOfMeta(metadata: u32) u64 {
-        return @intCast(metadata & hashMask);
-    }
-
-    fn metaOfHashDistanceIndex(hash: u64, distance: u32, idx: u32) u32 {
-        return @as(u32, @intCast(cutHash(hash))) | (distance << 27) | (idx << 17) | presentMask;
-    }
-
-    fn idxOfMeta(metadata: u32) usize {
-        return @intCast((metadata & idxMask) >> 17);
-    }
-
-    fn cutHash(hash: u64) u64 {
-        return (hash & hashMask);
-    }
-
-    pub fn clear(this: *This, level: u8) void {
-        for (0..smallMapEntries) |entry_i| {
-            this.metadata[entry_i] = 0;
+    pub fn clear(this: *This, level: u6) void {
+        for (0..bucketCount) |entry_i| {
+            this.entries[entry_i].clear();
         }
-        for (0..smallMapEntries) |i| {
-            this.free_idx[i] = @intCast(smallMapEntries - 1 - i);
-        }
-        this.free_idx_count = smallMapEntries;
         this.level = level;
         this.size = 0;
     }
 
     pub const Result = union(enum) {
-        Present: *Value,
-        Absent: *Value,
+        Present: struct { value: *Value, expires: *u32 },
+        Absent: struct { value: *Value, expires: *u32 },
+        Expired: struct { value: *Value, expires: *u32 },
         Split,
     };
 
-    // leading zeroes = index
-    const shifts_clz_vec_a = @Vector(8, u32){ 31, 30, 29, 28, 27, 26, 25, 24 };
-    const shifts_clz_vec_b = @Vector(8, u32){ 23, 22, 21, 20, 19, 18, 17, 16 };
-    const clz_vec_a = @as(@Vector(8, u32), @splat(1)) << shifts_clz_vec_a;
-    const clz_vec_b = @as(@Vector(8, u32), @splat(1)) << shifts_clz_vec_b;
+    pub const Deleted = struct {
+        entry: Entry,
+        expired: bool,
+    };
 
-    const hash_mask: @Vector(8, u32) = @splat(hashMask);
-    const zeroes: @Vector(8, u32) = @splat(0);
-
-    fn toClzIdxFast(this: *const This, hash: u64, comptime part: usize) u32 {
-        // a bit of SIMD to find the first indexes with a matching hash
-
-        const offset_start = if (part == 0) 0 else 8;
-        const clz_vec = if (part == 0) clz_vec_a else clz_vec_b;
-        const shifted_hash_vec: @Vector(8, u32) = @splat(@intCast(cutHash(hash)));
-
-        const starting_pos = hash % smallMapEntries + offset_start;
-
-        const meta_vec = if (starting_pos + 7 >= smallMapEntries) @Vector(8, u32){
-            this.metadata[(starting_pos + 0) % smallMapEntries],
-            this.metadata[(starting_pos + 1) % smallMapEntries],
-            this.metadata[(starting_pos + 2) % smallMapEntries],
-            this.metadata[(starting_pos + 3) % smallMapEntries],
-            this.metadata[(starting_pos + 4) % smallMapEntries],
-            this.metadata[(starting_pos + 5) % smallMapEntries],
-            this.metadata[(starting_pos + 6) % smallMapEntries],
-            this.metadata[(starting_pos + 7) % smallMapEntries],
-        } else @Vector(8, u32){
-            // fastpath no div (branch vs 8divs, but branch is ez to predict)
-            this.metadata[starting_pos + 0],
-            this.metadata[starting_pos + 1],
-            this.metadata[starting_pos + 2],
-            this.metadata[starting_pos + 3],
-            this.metadata[starting_pos + 4],
-            this.metadata[starting_pos + 5],
-            this.metadata[starting_pos + 6],
-            this.metadata[starting_pos + 7],
-        };
-        const hash_meta_vec = meta_vec & hash_mask;
-        const hash_eq = hash_meta_vec == shifted_hash_vec;
-        const clz_idxs = @select(u32, hash_eq, clz_vec, zeroes);
-        const idxes = @reduce(.Or, clz_idxs);
-        return idxes;
-    }
-
-    fn findIdxOf(this: *const This, shifted_hash: u64, key: *const string.String) ?usize {
-        const one: u32 = 1;
-        const starting_pos = shifted_hash % smallMapEntries;
-
-        var clz_access = this.toClzIdxFast(shifted_hash, 0);
-        while (clz_access != 0) {
-            const idx: u32 = @clz(clz_access); // get set bit
-            clz_access ^= (one << 31) >> @intCast(idx); // unset bit
-            const meta_idx = (starting_pos + idx) % smallMapEntries;
-            if (this.entries[idxOfMeta(this.metadata[meta_idx])].key.eql(key)) {
-                return meta_idx;
-            }
-        }
-
-        clz_access = this.toClzIdxFast(shifted_hash, 1);
-        while (clz_access != 0) {
-            const idx: u32 = @clz(clz_access); // get set bit
-            clz_access ^= (one << 31) >> @intCast(idx); // unset bit
-            const meta_idx = (starting_pos + idx) % smallMapEntries;
-            if (this.entries[idxOfMeta(this.metadata[meta_idx])].key.eql(key)) {
-                return meta_idx;
-            }
-        }
-        return null;
+    fn bucketIndex(shifted_hash: u64) usize {
+        const bucketIdx = shifted_hash % bucketCount;
+        return bucketIdx;
     }
 
     // If Result.Present key is owned by caller. If Result.Absent key is consumed by SmallMap
     // if Result.Split the key is owned by caller and nothing has been changed
-    pub fn updateOrCreate(this: *This, hash: u64, key: string.String) Result {
-        if (this.size == @as(u16, @intCast(smallMapEntries - (smallMapEntries / 25)))) {
-            // - smallMapEntries / 25 is a small buffer to avoid very long runs on insert
-            return .Split;
-        }
-        const shifted_hash = hash >> @intCast(this.level);
-
-        if (this.findIdxOf(shifted_hash, &key)) |idx| {
-            return Result{ .Present = &this.entries[idxOfMeta(this.metadata[idx])].value };
-        }
-
-        var pos = shifted_hash % smallMapEntries;
-        var distance: u32 = 0;
-        while (isMetaPresent(this.metadata[pos]) and distanceOfMeta(this.metadata[pos]) >= distance and distance <= maxDist) {
-            pos += 1;
-            pos %= smallMapEntries;
-            distance += 1;
-        }
-
-        if (distance > maxDist) {
-            return .Split;
-        }
-
-        if (!isMetaPresent(this.metadata[pos])) {
-            const insert_idx = this.free_idx[this.free_idx_count - 1];
-            this.free_idx_count -= 1;
-            this.metadata[pos] = metaOfHashDistanceIndex(
-                shifted_hash,
-                distance,
-                @intCast(insert_idx),
-            );
-            this.entries[insert_idx].key = key;
-            this.size += 1;
-            return Result{ .Absent = &this.entries[insert_idx].value };
-        }
-
-        // shift all later entries.
-        // We need to do it 2 times to prevent corruption and OOM.
-
-        // first pass, test if insert is possible:
-        var prev_entry = this.metadata[pos];
-        var shift_pos = pos;
-        while (isMetaPresent(prev_entry)) {
-            shift_pos += 1;
-            shift_pos %= smallMapEntries;
-
-            const prev_distance = distanceOfMeta(prev_entry);
-            const new_distance = prev_distance + 1;
-
-            if (new_distance > maxDist) {
-                // we know that this insert couldn't be completed
-                return .Split;
-            }
-
-            prev_entry = this.metadata[shift_pos];
-        }
-
-        // second pass with the knowledge, that this insert can be completed;
-        prev_entry = this.metadata[pos];
-        shift_pos = pos;
-
-        const insert_idx = this.free_idx[this.free_idx_count - 1];
-        this.free_idx_count -= 1;
-        this.metadata[pos] = metaOfHashDistanceIndex(
-            shifted_hash,
-            distance,
-            @intCast(insert_idx),
-        );
-        this.entries[@intCast(insert_idx)] = Entry{
-            .key = key,
-            .value = Value.nil(),
-        };
-
-        const v_ptr = &this.entries[@intCast(insert_idx)].value;
-
-        while (isMetaPresent(prev_entry)) {
-            shift_pos += 1;
-            shift_pos %= smallMapEntries;
-
-            const prev_distance = distanceOfMeta(prev_entry);
-            const new_distance = prev_distance + 1;
-
-            const tmp = this.metadata[shift_pos];
-            this.metadata[shift_pos] = metaOfHashDistanceIndex(
-                hashOfMeta(prev_entry),
-                new_distance,
-                @intCast(idxOfMeta(prev_entry)),
-            );
-            prev_entry = tmp;
-        }
-
-        this.size += 1;
-        return Result{ .Absent = v_ptr };
+    pub fn updateOrCreate(this: *This, hash: u64, key: string.String, now: u32) Result {
+        const shifted_hash = hash >> this.level;
+        const bucket_index = bucketIndex(shifted_hash);
+        const bucket = &this.entries[bucket_index];
+        return bucket.updateOrCreate(shifted_hash, key, now);
     }
 
-    pub fn get(this: *const This, hash: u64, key: *const string.String) ?*const Value {
-        const shifted_hash = hash >> @intCast(this.level);
-        if (this.findIdxOf(shifted_hash, key)) |idx| {
-            return &this.entries[idxOfMeta(this.metadata[idx])].value;
-        }
-        return null;
+    pub fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?*const Value {
+        const shifted_hash = hash >> this.level;
+        const bucket_index = bucketIndex(shifted_hash);
+        const bucket = &this.entries[bucket_index];
+        return bucket.get(shifted_hash, key, now);
     }
 
-    pub fn delete(this: *This, hash: u64, key: *const string.String) ?Entry {
-        const shifted_hash = hash >> @intCast(this.level);
-        if (this.findIdxOf(shifted_hash, key)) |idx| {
-            const metadata = this.metadata[idx];
-            if (hashOfMeta(metadata) == cutHash(shifted_hash) and
-                this.entries[idxOfMeta(metadata)].key.eql(key))
-            {
-                const deleted = this.entries[idxOfMeta(metadata)];
-
-                var pos: usize = @intCast(idx);
-                while (true) {
-                    var prev_pos = pos;
-                    pos += 1;
-                    pos %= smallMapEntries;
-                    const pos_meta = this.metadata[pos];
-                    const pos_dist = distanceOfMeta(pos_meta);
-
-                    if (!isMetaPresent(pos_meta) or pos_dist == 0) {
-                        this.free_idx[this.free_idx_count] = @intCast(idxOfMeta(this.metadata[prev_pos]));
-                        this.free_idx_count += 1;
-
-                        this.metadata[prev_pos] = 0;
-                        this.size -= 1;
-                        return deleted;
-                    }
-
-                    this.metadata[prev_pos] = this.metadata[pos];
-                    this.metadata[prev_pos] = metaOfHashDistanceIndex(
-                        hashOfMeta(pos_meta),
-                        pos_dist - 1,
-                        @intCast(idxOfMeta(pos_meta)),
-                    );
-                }
-            }
-        }
-
-        return null;
+    pub fn delete(this: *This, hash: u64, key: *const string.String, now: u32) ?Deleted {
+        const shifted_hash = hash >> this.level;
+        const bucket_index = bucketIndex(shifted_hash);
+        const bucket = &this.entries[bucket_index];
+        return bucket.delete(shifted_hash, key, now);
     }
 
-    fn fillFromSplit(this: *This, data: *This, bit: u64) void {
-        for (0..smallMapEntries) |i| {
-            const meta = data.metadata[i];
-            if (isMetaPresent(meta) and
-                hashOfMeta(meta) & 1 == bit)
-            {
-                const idx = idxOfMeta(meta);
-                switch (this.updateOrCreate(data.entries[idx].key.hash(), data.entries[idx].key)) {
-                    Result.Absent => |v| v.* = data.entries[idx].value,
+    fn fillFromSplit(this: *This, data: *This, bit: u16, now: u32) void {
+        const one: u16 = 1;
+        var inserted: usize = 0;
+        for (0..bucketCount) |i| {
+            const bucket = &data.entries[i];
+            var present = bucket.metaClzIdxFast(Bucket().present_mask | 1, Bucket().present_mask | bit);
+            while (present != 0) {
+                const idx = @clz(present);
+                present ^= (one << 15) >> @intCast(idx);
+
+                const entry = &bucket.entries[idx];
+                inserted += 1;
+                const hash = entry.key.hash();
+
+                switch (this.updateOrCreate(hash, entry.key, now)) {
+                    Result.Absent => |v| {
+                        v.value.* = entry.value;
+                        v.expires.* = bucket.expiry[idx];
+                    },
                     else => unreachable,
                 }
             }
@@ -865,12 +828,13 @@ pub const ExtendibleMap = struct {
         second_map.version.store(0, std.atomic.Ordering.Monotonic);
         second_map.value.clear(next_level);
 
-        small_map.fillFromSplit(&tmp, 0);
+        small_map.fillFromSplit(&tmp, 0, 0);
         var second: *SmallMap = &second_map.value;
-        second.fillFromSplit(&tmp, 1);
+        second.fillFromSplit(&tmp, 1, 0);
         while (second_map.tryLock() == null) {
             // this isn't bussy as tryLock is uncontendet
         }
+
         return SplitMachine.init(SplitState{
             .this = this,
             .hash = hash,
@@ -988,15 +952,15 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
     pub fn drive(s: *InsertAndSplitState) Drive {
         if (s.acquiremachine) |*acquire| {
             if (acquire.drive()) |acquired| {
-                switch (acquired.map.updateOrCreate(s.key.hash(), s.key)) {
+                switch (acquired.map.updateOrCreate(s.key.hash(), s.key, 0)) {
                     SmallMap.Result.Present => |ptr| return Drive{ .Complete = .{
                         .present = true,
-                        .value = ptr,
+                        .value = ptr.value,
                         .acquired = acquired,
                     } },
                     SmallMap.Result.Absent => |ptr| return Drive{ .Complete = .{
                         .present = false,
-                        .value = ptr,
+                        .value = ptr.value,
                         .acquired = acquired,
                     } },
                     SmallMap.Result.Split => {
@@ -1007,6 +971,7 @@ pub const InsertAndSplitMachine = state.Machine(InsertAndSplitState, ?InsertAndS
                         s.acquiremachine = null;
                         return drive(s);
                     },
+                    else => unreachable,
                 }
             }
             return .Incomplete;
@@ -1040,7 +1005,7 @@ test "map.ExtendibleMap multi-single" {
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
         const Drive = state.Drive(bool);
         pub fn drive(s: *string.String, dep: *const SmallMap) Drive {
-            const value = dep.get(s.hash(), s) orelse return Drive{ .Complete = false };
+            const value = dep.get(s.hash(), s, 0) orelse return Drive{ .Complete = false };
             if (value.asConstString()) |str| {
                 return Drive{ .Complete = str.eql(s) };
             }
@@ -1134,7 +1099,7 @@ test "map.ExtendibleMap multi" {
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
         const Drive = state.Drive(bool);
         pub fn drive(s: *string.String, dep: *const SmallMap) Drive {
-            const value = dep.get(s.hash(), s) orelse return Drive{ .Complete = false };
+            const value = dep.get(s.hash(), s, 0) orelse return Drive{ .Complete = false };
             if (value.asConstString()) |str| {
                 return Drive{ .Complete = str.eql(s) };
             }
@@ -1227,10 +1192,10 @@ test "map.ExtendibleMap single" {
         while (true) {
             var acquire_machine = map.acquire(h);
             var m: ExtendibleMap.AcquireResult = acquire_machine.run();
-            switch (m.map.updateOrCreate(h, k)) {
+            switch (m.map.updateOrCreate(h, k, 0)) {
                 SmallMap.Result.Present => unreachable,
                 SmallMap.Result.Absent => |ptr| {
-                    ptr.* = Value.fromString(k);
+                    ptr.value.* = Value.fromString(k);
                     m.lock.unlock();
                     break;
                 },
@@ -1239,6 +1204,7 @@ test "map.ExtendibleMap single" {
                     var second: ExtendibleMap.AcquireResult = machine.run();
                     second.lock.unlock();
                 },
+                else => unreachable,
             }
             m.lock.unlock();
         }
@@ -1250,7 +1216,7 @@ test "map.ExtendibleMap single" {
     const read_machine = state.DepMachine(string.String, bool, *const SmallMap, struct {
         const Drive = state.Drive(bool);
         pub fn drive(s: *string.String, dep: *const SmallMap) Drive {
-            const value = dep.get(s.hash(), s) orelse return Drive{ .Complete = false };
+            const value = dep.get(s.hash(), s, 0) orelse return Drive{ .Complete = false };
             if (value.asConstString()) |str| {
                 return Drive{ .Complete = str.eql(s) };
             }
@@ -1287,20 +1253,20 @@ test "map.SmallMap split" {
         const start = i;
         while (true) : (i += 1) {
             var k = string.String.fromInt(@intCast(i));
-            if (a.updateOrCreate(k.hash(), k) == SmallMap.Result.Split) {
+            if (a.updateOrCreate(k.hash(), k, 0) == SmallMap.Result.Split) {
                 break;
             }
         }
         var b: SmallMap = undefined;
-        b.clear(1);
         var c: SmallMap = undefined;
+        b.clear(1);
         c.clear(1);
-        b.fillFromSplit(&a, 0);
-        c.fillFromSplit(&a, 1);
+        b.fillFromSplit(&a, 0, 0);
+        c.fillFromSplit(&a, 1, 0);
 
         for (start..i) |check| {
             var k = string.String.fromInt(@intCast(check));
-            expect(c.get(k.hash(), &k) != null or b.get(k.hash(), &k) != null) catch |err| {
+            expect(c.get(k.hash(), &k, 0) != null or b.get(k.hash(), &k, 0) != null) catch |err| {
                 std.debug.print("Missing key: {}, hash = {}\n", .{ check, k.hash() });
                 return err;
             };
@@ -1313,15 +1279,15 @@ test "map.SmallMap.basic" {
 
     var a: SmallMap = undefined;
     a.clear(0);
-    const n = smallMapEntries / 2;
+    const n = 304 / 2;
     const h = n / 2;
 
     for (0..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = k;
-        switch (a.updateOrCreate(k.hash(), k)) {
-            SmallMap.Result.Absent => |ptr| ptr.* = Value.fromString(v),
+        switch (a.updateOrCreate(k.hash(), k, 0)) {
+            SmallMap.Result.Absent => |ptr| ptr.value.* = Value.fromString(v),
             else => unreachable,
         }
     }
@@ -1330,11 +1296,11 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
-        switch (a.updateOrCreate(k.hash(), k)) {
+        switch (a.updateOrCreate(k.hash(), k, 0)) {
             SmallMap.Result.Present => |ptr| {
-                const as_str = ptr.asString() orelse unreachable;
+                const as_str = ptr.value.asString() orelse unreachable;
                 try expect(as_str.eql(&k));
-                ptr.* = Value.fromString(v);
+                ptr.value.* = Value.fromString(v);
             },
             else => unreachable,
         }
@@ -1344,7 +1310,7 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
-        var v_ptr = a.get(k.hash(), &k) orelse unreachable;
+        var v_ptr = a.get(k.hash(), &k, 0) orelse unreachable;
         const as_str = v_ptr.asConstString() orelse unreachable;
         try expect(as_str.eql(&v));
     }
@@ -1353,15 +1319,15 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
-        var entry = a.delete(k.hash(), &k) orelse unreachable;
-        const as_str = entry.value.asString() orelse unreachable;
+        var entry = a.delete(k.hash(), &k, 0) orelse unreachable;
+        const as_str = entry.entry.value.asString() orelse unreachable;
         try expect(as_str.eql(&v));
     }
 
     for (0..h) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
-        if (a.get(k.hash(), &k)) |_| {
+        if (a.get(k.hash(), &k, 0)) |_| {
             unreachable;
         }
     }
@@ -1370,7 +1336,7 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
-        var v_ptr = a.get(k.hash(), &k) orelse unreachable;
+        var v_ptr = a.get(k.hash(), &k, 0) orelse unreachable;
         const as_str = v_ptr.asConstString() orelse unreachable;
         try expect(as_str.eql(&v));
     }
@@ -1379,15 +1345,15 @@ test "map.SmallMap.basic" {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
         const v = string.String.fromInt(i + 1);
-        var entry = a.delete(k.hash(), &k) orelse unreachable;
-        const as_str = entry.value.asString() orelse unreachable;
+        var entry = a.delete(k.hash(), &k, 0) orelse unreachable;
+        const as_str = entry.entry.value.asString() orelse unreachable;
         try expect(as_str.eql(&v));
     }
 
     for (h..n) |ui| {
         const i: i64 = @intCast(ui);
         const k = string.String.fromInt(i);
-        if (a.get(k.hash(), &k)) |_| {
+        if (a.get(k.hash(), &k, 0)) |_| {
             unreachable;
         }
     }
