@@ -437,8 +437,6 @@ pub fn main() !void {
         const argsize = std.mem.indexOfSentinel(u8, 0, std.os.argv[i]);
         const arg = std.os.argv[i][0..argsize];
 
-        std.debug.print("Arg: '{s}'\n", .{arg});
-
         var size_ptr: ?*usize = if (seql(arg, "threads"))
             &config.thread_count
         else if (seql(arg, "allocator-pages"))
@@ -465,7 +463,6 @@ pub fn main() !void {
             } else {
                 const numargsize = std.mem.indexOfSentinel(u8, 0, std.os.argv[i]);
                 const numarg = std.os.argv[i][0..numargsize];
-                std.debug.print("Num: '{s}'\n", .{numarg});
 
                 if (std.fmt.parseInt(usize, numarg, 10)) |num| {
                     ptr.* = num;

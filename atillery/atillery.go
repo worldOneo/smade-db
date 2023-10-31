@@ -12,8 +12,8 @@ import (
 	"github.com/HdrHistogram/hdrhistogram-go"
 )
 
-const clients = 8
-const requestsPerClient = 100_000
+const clients = 48
+const requestsPerClient = 50_000
 
 const minKey = 1_000_000
 const maxKey = 9_999_999
@@ -84,7 +84,9 @@ func main() {
 	now := time.Now()
 
 	for i := 0; i < clients; i++ {
-		println(hist.Merge(<-res))
+		if hist.Merge(<-res) != 0 {
+			log.Panicf("The number isn't 0")
+		}
 	}
 
 	delta := time.Since(now)

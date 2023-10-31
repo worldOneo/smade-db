@@ -1,0 +1,28 @@
+const clients = 96
+const requestsPerClient = 50_000
+
+const minKey = 10_000_000
+const maxKey = 99_999_999
+const setPerTransaction = 5
+
+const okBytes = 5
+const queuedBytes = 9
+
+const listHead = 2
+
+// const recvBytes = okBytes + queuedBytes*setPerTransaction + listHead + okBytes*setPerTransaction // Dragonfly
+const recvBytes = okBytes + setPerTransaction*queuedBytes + okBytes // smade
+
+// const port = 6700 // Redis + Dragonfly
+const port = 32781 // smade for some reason
+
+
+Reqs/Sec: 604294.90 [7.943141707s]
+p50: 96
+p80: 163
+p90: 217
+p99: 413
+p99.9: 751
+p99.99: 46367
+p99.995: 47231
+p99.999: 47967
