@@ -61,15 +61,15 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
             if (commandmachine.drive()) |result| {
                 if (result) |result_v| {
                     var mapv: commands.SingleCommandResult = result_v;
-                    if (mapv.value.asConstString()) |str| {
+                    if (mapv.executed == .Set) {
+                        _ = s.client.sendbuffer.push("+OK\r\n");
+                    } else if (mapv.value.asConstString()) |str| {
                         const strlen = string.String.fromInt(@intCast(str.len()));
                         _ = s.client.sendbuffer.push("$");
                         _ = s.client.sendbuffer.push(strlen.sliceView());
                         _ = s.client.sendbuffer.push("\r\n");
                         _ = s.client.sendbuffer.push(str.sliceView());
                         _ = s.client.sendbuffer.push("\r\n");
-                    } else if (mapv.executed == .Set) {
-                        _ = s.client.sendbuffer.push("+OK\r\n");
                     } else if (mapv.executed == .Get) {
                         _ = s.client.sendbuffer.push("$-1\r\n"); // this valid :ok:
                     }
