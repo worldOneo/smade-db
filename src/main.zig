@@ -19,6 +19,23 @@ const ExecutionState = struct {
     now: u32,
 };
 
+fn setaffinity(workerid: usize, spacing: usize) !void {
+    var set: std.os.cpu_set_t = undefined;
+    @memset(&set, 0);
+    std.debug.assert(std.os.CPU_COUNT(set) == 0);
+    var bit = workerid * spacing;
+    var idx: usize = 0;
+    while (bit >= 64) : (bit -= 64) {
+        idx += 1;
+    }
+    const one: usize = 1;
+    set[idx] |= one << @as(u6, @intCast(bit));
+    std.debug.assert(std.os.CPU_COUNT(set) == 1);
+    const rc = std.os.linux.syscall3(.sched_setaffinity, 0, @sizeOf(std.os.cpu_set_t), @intFromPtr(&set));
+    if (@as(isize, @bitCast(rc)) < 0) return error.UnableToSetSchedAffinity;
+    std.debug.print("Pinned worker {} to cpu {} = {}\n", .{ workerid, workerid * spacing, one << @as(u6, @intCast(bit)) });
+}
+
 pub fn transactionInt(machine: *ExecutionMachine) u64 {
     const ptr = if (machine.state.transaction) |t| t else return 1;
     const base: u64 = @intFromPtr(ptr);
@@ -260,10 +277,17 @@ const Config = struct {
     allocator_pages: usize = 50000,
     thread_count: usize = 1,
     max_expansions: usize = 16,
+    affinity_spacing: usize = 0,
 };
 
-// TODO: Investigate random freezes this is just a remine its
 fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, status: *std.atomic.Atomic(u64), config: Config) void {
+    if (config.affinity_spacing > 0) {
+        setaffinity(worker_id, config.affinity_spacing) catch {
+            std.debug.print("Couldn't set affinity\n", .{});
+            std.os.exit(0);
+        };
+    }
+
     var la = alloc.LocalAllocator.init(allocator);
     var ctxpool = io.ContextPool.createPool(config.io_contexts, config.recv_buffer_size, config.send_buffer_size, std.heap.page_allocator) catch |err| {
         std.debug.print("#{} failed to allocate IO Context pool: {s}\n", .{ worker_id, @errorName(err) });
@@ -453,6 +477,8 @@ pub fn main() !void {
             &config.send_buffer_size
         else if (seql(arg, "max-expansions"))
             &config.max_expansions
+        else if (seql(arg, "affinity-spacing"))
+            &config.affinity_spacing
         else
             null;
 
@@ -503,6 +529,9 @@ pub fn main() !void {
                 \\
                 \\ -max-expansions
                 \\     The number of expansions (doubling) of entry count.
+                \\
+                \\ -affinity-spacing
+                \\     The number of cores between each worker core. If 0 no affinity is set.
                 \\
             , .{});
             return;
