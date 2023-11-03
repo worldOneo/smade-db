@@ -7,10 +7,10 @@ crusher_thread_range=32-48
 port=32781
 
 
-for i in {1..16}; do
+for ((i=0; i<=16; i+=2)); do
     n=$i
     
-    ./main -threads "$n" -allocator-pages 100000 2>/dev/null  &
+    ./main -threads "$n" -allocator-pages 100000 2>/dev/null &
 
     sleep 3
     
@@ -21,9 +21,11 @@ for i in {1..16}; do
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n.txt"
     
     pkill -f "main -threads $n -allocator-pages 100000"
+
+    sleep 3
 done
 
-for i in {1..16}; do
+for ((i=0; i<=16; i+=2)); do
     n=$i
     
     ./main -threads "$n" -allocator-pages 100000 -affinity-spacing 2 2>/dev/null &
@@ -37,6 +39,8 @@ for i in {1..16}; do
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n - 2.txt"
     
     pkill -f "./main -threads $n -allocator-pages 100000 -affinity-spacing 2"
+
+    sleep 3
 done
 
 dragonfly_configs=(
@@ -56,7 +60,6 @@ dragonfly_configs=(
   "--num_shards=4 --conn_io_threads=4",
   "--num_shards=5 --conn_io_threads=3",
   "--num_shards=3 --conn_io_threads=5",
-  "--num_shards=6 --conn_io_threads=2",
   "--num_shards=2 --conn_io_threads=6",
 # 10
   "--num_shards=5 --conn_io_threads=5",
@@ -96,4 +99,6 @@ for ((i=0; i<${#dragonfly_configs[@]}; i++)); do
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n - 2.txt"
     
     pkill -f "dragonfly $args --port 6700"
+
+    sleep 5
 done
