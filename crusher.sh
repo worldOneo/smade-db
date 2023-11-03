@@ -15,9 +15,9 @@ for n in "${smade_threads[@]}"; do
     
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:0 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port >> "smade - $n.txt"
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port --key-pattern G:G >> "smade - $n.txt"
-    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern G:G >> "smade - $n.txt"
+    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 75000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern G:G >> "smade - $n.txt"
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port --key-pattern R:R >> "smade - $n.txt"
-    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n.txt"
+    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 75000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n.txt"
     
     pkill -f "main -threads $n -allocator-pages 100000"
 
@@ -33,9 +33,9 @@ for n in "${smade_threads[@]}"; do
     
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:0 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port >> "smade - $n - 2.txt"
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port --key-pattern G:G >> "smade - $n - 2.txt"
-    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern G:G >> "smade - $n - 2.txt"
+    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 75000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern G:G >> "smade - $n - 2.txt"
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port --key-pattern R:R >> "smade - $n - 2.txt"
-    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n - 2.txt"
+    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 75000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "smade - $n - 2.txt"
     
     pkill -f "./main -threads $n -allocator-pages 100000 -affinity-spacing 2"
 
@@ -91,9 +91,9 @@ for args in "${dragonfly_configs[@]}"; do
     
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:0 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port >> "dragonfly - $args.txt"
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port --key-pattern G:G >> "dragonfly - $args.txt"
-    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern G:G >> "dragonfly - $args.txt"
+    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 75000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern G:G >> "dragonfly - $args.txt"
     taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 500000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 --pipeline=8  -p $port --key-pattern R:R >> "dragonfly - $args.txt"
-    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 50000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "dragonfly - $args.txt"
+    taskset -c $crusher_thread_range memtier_benchmark -s localhost -t $threads -c $connections -d 20 -n 75000 --ratio=1:10 --key-minimum=1 --key-maximum=100000000 --hide-histogram --print-percentiles=50,80,90,99,99.9,99.99,99.995,99.999,100 -p $port --key-pattern R:R >> "dragonfly - $args.txt"
     
     pkill -f "dragonfly $args --port 6700"
 
