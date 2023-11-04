@@ -278,6 +278,7 @@ const Config = struct {
     thread_count: usize = 1,
     max_expansions: usize = 16,
     affinity_spacing: usize = 0,
+    status_check: usize = 0,
 };
 
 fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, status: *std.atomic.Atomic(u64), config: Config) void {
@@ -479,6 +480,8 @@ pub fn main() !void {
             &config.max_expansions
         else if (seql(arg, "affinity-spacing"))
             &config.affinity_spacing
+        else if (seql(arg, "status-check"))
+            &config.status_check
         else
             null;
 
@@ -555,13 +558,15 @@ pub fn main() !void {
         };
     }
 
-    var arr = [1]u8{0};
-    while (true) {
-        _ = try std.io.getStdIn().read(&arr);
-        for (0..config.thread_count) |thread| {
-            const w = status[thread].load(std.atomic.Ordering.Monotonic);
-            const wstatus = WorkerStatus.fromInt(w);
-            std.debug.print("Thread {}, sleep = {}, connections = {}, event loop = {}\n", .{ thread, wstatus.sleep, wstatus.connection_count, wstatus.event_loop });
+    if (config.status_check != 0) {
+        var arr = [1]u8{0};
+        while (true) {
+            _ = try std.io.getStdIn().read(&arr);
+            for (0..config.thread_count) |thread| {
+                const w = status[thread].load(std.atomic.Ordering.Monotonic);
+                const wstatus = WorkerStatus.fromInt(w);
+                std.debug.print("Thread {}, sleep = {}, connections = {}, event loop = {}\n", .{ thread, wstatus.sleep, wstatus.connection_count, wstatus.event_loop });
+            }
         }
     }
 

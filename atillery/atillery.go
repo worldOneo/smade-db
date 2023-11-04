@@ -12,23 +12,17 @@ import (
 	"github.com/HdrHistogram/hdrhistogram-go"
 )
 
-const clients = 48
+const clients = 192
 const requestsPerClient = 50_000
 
-const minKey = 1_000_000
-const maxKey = 9_999_999
+const minKey = 10_000_000
+const maxKey = 99_999_999
 const setPerTransaction = 5
 
 const okBytes = 5
 const queuedBytes = 9
 
 const listHead = 2
-
-// const recvBytes = okBytes + queuedBytes*setPerTransaction + listHead + okBytes*setPerTransaction // Dragonfly
-const recvBytes = okBytes + setPerTransaction*queuedBytes + okBytes // smade
-
-// const port = 6379 // Redis + Dragonfly
-const port = 32781 // smade for some reason
 
 func stress(port uint16, out chan *hdrhistogram.Histogram) {
 	connection, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
@@ -43,9 +37,9 @@ func stress(port uint16, out chan *hdrhistogram.Histogram) {
 		send.Reset()
 		send.WriteString("*1\r\n$5\r\nMULTI\r\n")
 		for t := 0; t < setPerTransaction; t++ {
-			send.WriteString("*3\r\n$3\r\nSET\r\n$7\r\n")
+			send.WriteString("*3\r\n$3\r\nSET\r\n$8\r\n")
 			fmt.Fprintf(&send, "%d", rand.Intn(maxKey-minKey)+minKey)
-			send.WriteString("\r\n$7\r\n")
+			send.WriteString("\r\n$8\r\n")
 			fmt.Fprintf(&send, "%d", rand.Intn(maxKey-minKey)+minKey)
 			send.WriteString("\r\n")
 		}
