@@ -10,6 +10,8 @@ git clone https://github.com/worldOneo/smade-db
 cd smade-db
 ../zig-linux-x86_64-0.11.0/zig build-exe -O ReleaseFast -mcpu native ./src/main.zig
 
+service dragonfly stop
+
 snap install go --classic
 cd atillery
 go build -tags=smade

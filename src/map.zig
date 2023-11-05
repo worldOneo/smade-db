@@ -574,7 +574,7 @@ pub const ExtendibleMap = struct {
     fn lock_sorter(_: void, a: MAcquireItem, b: MAcquireItem) bool {
         if (a.lock) |alock| {
             if (b.lock) |block| {
-                return @intFromPtr(alock) <= @intFromPtr(block);
+                return @intFromPtr(alock) < @intFromPtr(block);
             } else {
                 return true;
             }
@@ -608,7 +608,8 @@ pub const ExtendibleMap = struct {
 
             if (old_lock.tryLock()) |_| {
                 const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-                const idx = currentIdx(dict, s.locks[s.locks_acquired].hash);
+                const old_hash = s.locks[s.locks_acquired].hash;
+                const idx = currentIdx(dict, old_hash);
                 const now_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
                 if (now_lock != old_lock) {
                     // now the fun begins.
@@ -638,13 +639,19 @@ pub const ExtendibleMap = struct {
                         // lock1|<oldlock>|lock2|lock3|lock4 ...
                         //                        idx
                         //       Shift lock2 and lock3 down by one
-                        // The null protector prevents null from being shifted from after the valid locks into the locks
-                        var null_protector: usize = if (s.locks[insert_idx].lock == null) 0 else 1;
-                        for ((s.locks_acquired + 1)..(insert_idx + null_protector)) |i| {
-                            s.locks[i - 1] = s.locks[i];
+                        //
+                        // If s.lock[insert_idx] == null then we must decrease insert idx by one
+                        // inorder to keep the new lock in a valid range:
+                        //
+                        // lock1|<oldlock>|lock2|lock3|null
+                        //                             idx
+                        if (s.locks[insert_idx].lock == null) insert_idx -= 1;
+                        for (s.locks_acquired..(insert_idx + 1)) |i| {
+                            s.locks[i] = s.locks[i + 1];
                         }
                     }
                     s.locks[insert_idx].lock = now_lock;
+                    s.locks[insert_idx].hash = old_hash;
                     s.locks_acquired = @min(insert_idx, s.locks_acquired);
                     old_lock.unlock();
                     return drive(s);
