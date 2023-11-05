@@ -38,7 +38,7 @@ const groups = [
   "p100",
 ];
 
-const folder = "./benchmark-results/round-3-intel/";
+const folder = "./benchmark-results/round-3-intel-full-atillery/";
 const results = new Map();
 
 const numFromStr = s => {
@@ -115,6 +115,8 @@ const atilleryDatabaseConfigs = [
   ["smade", /^atillery smade \d{1,2}\.txt/],
   ["dragonfly", /^atillery dragonfly \d{1,2}\.txt/],
   ["redis", /^atillery redis\.txt/],
+  ["smade - pinned", /^atillery smade \d{1,2} - 2\.txt/],
+  ["dragonfly - pinned", /^atillery dragonfly \d{1,2} - 2\.txt/],
 ];
 
 /**
