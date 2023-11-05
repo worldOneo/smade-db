@@ -574,7 +574,7 @@ pub const ExtendibleMap = struct {
     fn lock_sorter(_: void, a: MAcquireItem, b: MAcquireItem) bool {
         if (a.lock) |alock| {
             if (b.lock) |block| {
-                return @intFromPtr(alock) < @intFromPtr(block);
+                return @intFromPtr(alock) <= @intFromPtr(block);
             } else {
                 return true;
             }
