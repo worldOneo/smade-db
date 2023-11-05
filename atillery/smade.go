@@ -2,5 +2,5 @@
 
 package main
 
-const recvBytes = okBytes + queuedBytes*setPerTransaction + listHead + okBytes*setPerTransaction // Dragonfly
-const port = 6379
+const recvBytes = okBytes + queuedBytes*setPerTransaction + okBytes
+const port = 32781

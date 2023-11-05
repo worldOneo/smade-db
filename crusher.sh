@@ -58,6 +58,7 @@ for n in "${smade_threads[@]}"; do
     pkill -f "dragonfly $args --port 6700"
 
     sleep 5
+    rm *.dfs
 done
 
 for n in "${smade_threads[@]}"; do
@@ -75,6 +76,7 @@ for n in "${smade_threads[@]}"; do
     pkill -f "dragonfly $args --port 6700"
 
     sleep 5
+    rm *.dfs
 done
 
 port=1234
