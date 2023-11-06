@@ -140,6 +140,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                         var tx: *commands.MultiState = &s.transaction.?.state;
 
                         var exec = tx.addCommand(list.*) catch |err| {
+                            std.debug.print("TX add command: {s}\n", .{@errorName(err)});
                             _ = s.client.sendbuffer.push("-");
                             _ = s.client.sendbuffer.push(@errorName(err));
                             _ = s.client.sendbuffer.push("\r\n");
@@ -161,6 +162,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                         s.donothing = false;
                         return res;
                     } else if (std.mem.eql(u8, f_str.sliceView(), "MULTI")) {
+                        list.deinit(s.allocator);
                         // Begin transaction
                         if (s.allocator.allocate(commands.MultiMachine)) |machine| {
                             s.transaction_prep = 1;
@@ -171,6 +173,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                             s.donothing = false;
                             return res;
                         } else {
+                            std.debug.print("TX init OOM\n", .{});
                             _ = s.client.sendbuffer.push("-OOM\r\n");
                             return .Incomplete;
                         }
@@ -178,7 +181,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 }
 
                 // the transaction takes ownership of vv.value so we cannot dealloc it if it was eaten.
-                defer vv.value.deinit(s.allocator);
+                defer list.deinit(s.allocator);
                 var vlist = list;
 
                 if (commands.CommandState.init(s.data, vlist, s.now, s.allocator)) |comm_state| {
