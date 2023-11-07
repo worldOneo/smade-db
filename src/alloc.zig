@@ -88,6 +88,8 @@ const Page = struct {
         if (this.free_list) |free_list| {
             allocLog("thread {} allocating size {} ({s}) for page {*} from free list\n", .{ std.Thread.getCurrentId(), size, @typeName(T), this });
             const alloc = free_list;
+            if (@intFromPtr(free_list) == 0) unreachable;
+            if (@intFromPtr(this) == 0) unreachable;
             this.free_list = free_list.next;
             return @ptrCast(@alignCast(alloc));
         }
@@ -147,7 +149,7 @@ const Page = struct {
                     @ptrFromInt(@intFromEnum(PageStates.NORMAL)),
                     std.atomic.Ordering.Monotonic,
                     std.atomic.Ordering.Monotonic,
-                )) |_| {
+                ) == null) {
                     allocLog("thread {} local marking {*} as thread normal page\n", .{ std.Thread.getCurrentId(), this });
                     // return page to available to allocate state
                     var size_class: *SizeClass = @ptrCast(this.size_class);
