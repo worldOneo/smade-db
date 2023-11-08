@@ -73,7 +73,7 @@ fn worker(worker_id: usize, config: Config, signal: *std.atomic.Atomic(u32), rep
 
         while (iterator.next() catch |err| {
             std.debug.print("#{} IO Error: {s}\n", .{ worker_id, @errorName(err) });
-            continue;
+            std.os.exit(0);
         }) |item| {
             if (item.lastevent == io.IOEvent.Open) {
                 var lines = sendPayload(item, config.payload, config.dbtype, &rnd);
@@ -87,7 +87,7 @@ fn worker(worker_id: usize, config: Config, signal: *std.atomic.Atomic(u32), rep
                     std.os.exit(0);
                 };
             } else if (item.lastevent == io.IOEvent.Data) {
-                if (countLines(item.recvbuffer.dataReady()) == item.userdata >> 32) {
+                if (countLines(item.recvbuffer.dataReady()) >= item.userdata >> 32) {
                     item.recvbuffer.dataConsumed(item.recvbuffer.dataReady().len);
                     const delta = now - (item.userdata & ((1 << 32) - 1));
                     if (status == 1) {
@@ -125,7 +125,7 @@ fn worker(worker_id: usize, config: Config, signal: *std.atomic.Atomic(u32), rep
 }
 
 fn normal(rnd: *std.rand.Random) i64 {
-    return @intFromFloat((((rnd.float(f64) + rnd.float(f64) + rnd.float(f64))) / 3) * 89_999_999 + 10_000_00);
+    return @intFromFloat((((rnd.float(f64) + rnd.float(f64) + rnd.float(f64))) / 3) * 89_999_999 + 10_000_000);
 }
 
 fn sendPayload(ctx: *io.ConnectionContext, payload_type: usize, dbtype: usize, rnd: *std.rand.DefaultPrng) u64 {
@@ -344,32 +344,24 @@ pub fn main() !void {
     for (0..config.thread_count) |thread_num| {
         for (0..999_999) |i| {
             latency[i] += recv[thread_num * 1_000_000 + i];
-            latency_sum += @intCast(recv[thread_num * 1_000_000 + i]);
+            latency_sum += @as(usize, recv[thread_num * 1_000_000 + i]) * i;
         }
         reqs += recv[thread_num * 1_000_000 + 999_999];
     }
 
-    std.io.getStdIn().writer().print("Req/Sec: {}\n", .{reqs / load_seconds}) catch unreachable;
+    std.io.getStdOut().writer().print("Req/Sec: {} [{} / 20s]\n", .{ reqs / load_seconds, reqs }) catch unreachable;
 
     var freqs: f64 = @floatFromInt(reqs);
-    var prints: [8]f64 = [8]f64{ freqs * 0.5, freqs * 0.80, freqs * 0.90, freqs * 0.99, freqs * 0.999, freqs * 0.9999, freqs * 0.99995, freqs * 0.99999 };
-    var texts: [8][]const u8 = [_][]const u8{
-        "p50",
-        "p80",
-        "p90",
-        "p99",
-        "p99.9",
-        "p99.99",
-        "p99.995",
-        "p99.999",
-    };
+    var prints: [9]f64 = [9]f64{ freqs * 0.5, freqs * 0.80, freqs * 0.90, freqs * 0.99, freqs * 0.999, freqs * 0.9999, freqs * 0.99995, freqs * 0.99999, freqs };
+    var texts: [9][]const u8 = [_][]const u8{ "p50", "p80", "p90", "p99", "p99.9", "p99.99", "p99.995", "p99.999", "p100" };
     var count: usize = 0;
     var ripidx: usize = 0;
-    for (0..8) |i| {
+    std.io.getStdOut().writer().print("Avg: {}\n", .{latency_sum / reqs}) catch unreachable;
+    for (0..9) |i| {
         while (@as(f64, @floatFromInt(count)) < prints[i]) {
             count += latency[ripidx];
             ripidx += 1;
         }
-        std.io.getStdIn().writer().print("{s}: {}\n", .{ texts[i], ripidx }) catch unreachable;
+        std.io.getStdOut().writer().print("{s}: {}\n", .{ texts[i], ripidx }) catch unreachable;
     }
 }

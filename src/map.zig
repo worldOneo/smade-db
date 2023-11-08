@@ -643,7 +643,7 @@ pub const ExtendibleMap = struct {
                         // We must decrease insert idx by one because it points at the next greater element.
                         insert_idx -= 1;
 
-                        for (s.locks_acquired..(insert_idx + 1)) |i| {
+                        for (s.locks_acquired..insert_idx) |i| {
                             s.locks[i] = s.locks[i + 1];
                         }
                     }
