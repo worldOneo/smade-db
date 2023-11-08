@@ -233,7 +233,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
                 return null;
             }
             if (frame[pos] != '\n') {
-                return error.MissingTerminator;
+                return error.MissingStrLenTerminator;
             }
             pos += 1;
             const ulength: usize = @intCast(length);
@@ -249,7 +249,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
                 return null;
             }
             if (frame[pos] != '\r') {
-                return error.MissingTerminator;
+                return error.MissingStrTerminator;
             }
             pos += 1;
             break :blk RespValue.from(str);
@@ -278,7 +278,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
                 return null;
             }
             if (frame[pos] != '\n') {
-                return error.MissingTerminator;
+                return error.MissingListLenTerminator;
             }
             pos += 1;
             const ulength: usize = @intCast(length);
@@ -300,7 +300,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
                 return null;
             }
             if (frame[pos] != '\n') {
-                return error.MissingTerminator;
+                return error.MissingMapLenTerminator;
             }
             const ulength: usize = @intCast(length);
             var map = RespMap.init(ulength, la) orelse return error.OutOfMemory;
@@ -337,7 +337,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
     }
     if (frame[pos] != '\n') {
         std.debug.print("pos = {}\n", .{pos});
-        return error.MissingTerminator;
+        return error.MissingCommonTerminator;
     }
     return ParseResult{ .value = value, .read_until = pos };
 }

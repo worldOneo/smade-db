@@ -3,3 +3,5 @@ zig-out/
 main
 main.o
 atillery/atillery
+loader.o
+loader

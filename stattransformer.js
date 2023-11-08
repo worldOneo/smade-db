@@ -105,7 +105,7 @@ for (let benchmark = 0; benchmark < benchmarks.length; benchmark++) {
         ]);
     }
   }
-  results.set(benchmarks[benchmark], benchResults);
+  if (benchResults.size != 0) results.set(benchmarks[benchmark], benchResults);
 }
 
 /**
@@ -164,7 +164,7 @@ for (let c of coreConfigs) {
       ]);
   }
 }
-results.set("atillery", benchResults);
+if (benchResults.size != 0) results.set("atillery", benchResults);
 
 for (let [benchmark, dbs] of results) {
   console.log(benchmark);

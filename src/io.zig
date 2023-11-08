@@ -47,7 +47,7 @@ pub const Buffer = struct {
         return this.data.len - this.written;
     }
 
-    fn cleanup(this: *This) void {
+    pub fn cleanup(this: *This) void {
         if (this.read > 0) {
             var start: usize = 0;
             for (this.read..this.written) |i| {
@@ -112,6 +112,7 @@ pub const IOEvent = enum {
     None,
     Data,
     Write,
+    Open,
     Lost,
 };
 
@@ -120,6 +121,7 @@ pub const IORequestType = enum(u8) {
     Read,
     Write,
     Close,
+    Open,
 };
 
 const IORequest = struct {
@@ -221,7 +223,7 @@ pub const IOEventIterator = struct {
                     if (res > 0) {
                         if (ctx.lastevent != .Lost) {
                             ctx.recvbuffer.written += @intCast(res);
-                            if (ctx.recvbuffer.written >= 1024) unreachable;
+                            if (ctx.recvbuffer.written >= ctx.recvbuffer.data.len) unreachable;
                             try this.server.addReadRequest(ctx);
                             ctx.lastevent = .Data;
                         }
@@ -244,12 +246,16 @@ pub const IOEventIterator = struct {
                     } else {
                         ctx.lastevent = .None;
                         ctx.invalid = true;
+                        continue;
                     }
-                    continue;
                 },
                 .Close => {
                     this.server.done(ctx);
                     continue;
+                },
+                .Open => {
+                    ctx.lastevent = .Open;
+                    if (res < 0) return error.ConnectSocket;
                 },
             }
             return ctx;
@@ -263,43 +269,49 @@ pub const IOServer = struct {
     serveraddr: linux.sockaddr.in,
     uring: linux.IO_Uring,
     accepting: bool,
+    bound: bool,
 
     const This = @This();
 
-    pub fn init(pool: ContextPool, queue_depth: u13, port: u16) !This {
+    pub fn init(pool: ContextPool, queue_depth: u13) !This {
         var server: IOServer = undefined;
-        server.accepting = false;
+        server.bound = false;
+
+        server.uring = try linux.IO_Uring.init(queue_depth, 0);
+        server.contextpool = pool;
+        return server;
+    }
+
+    pub fn bind(this: *This, port: u16) !void {
+        this.accepting = false;
 
         // create TCP fd
-        server.serverfd = sysint(linux.socket(linux.PF.INET, linux.SOCK.STREAM, linux.IPPROTO.TCP));
-        if (server.serverfd == -1) {
+        this.serverfd = sysint(linux.socket(linux.PF.INET, linux.SOCK.STREAM, linux.IPPROTO.TCP));
+        if (this.serverfd == -1) {
             return error.SocketSetup;
         }
 
         // setops for TCP fd
         const enabled: i32 = 1;
-        const optsaddr = sysint(linux.setsockopt(server.serverfd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&enabled), @sizeOf(i32)));
-        const optsport = sysint(linux.setsockopt(server.serverfd, linux.SOL.SOCKET, linux.SO.REUSEPORT, @ptrCast(&enabled), @sizeOf(i32)));
+        const optsaddr = sysint(linux.setsockopt(this.serverfd, linux.SOL.SOCKET, linux.SO.REUSEADDR, @ptrCast(&enabled), @sizeOf(i32)));
+        const optsport = sysint(linux.setsockopt(this.serverfd, linux.SOL.SOCKET, linux.SO.REUSEPORT, @ptrCast(&enabled), @sizeOf(i32)));
         if (optsaddr < 0) return error.SockOpReuseAddr;
         if (optsport < 0) return error.SockOpReusePort;
 
         // bind addr&port to TCP fd
-        server.serveraddr.family = linux.AF.INET;
-        server.serveraddr.port = port;
-        server.serveraddr.addr = 0;
-        const sockbind = sysint(linux.bind(server.serverfd, @ptrCast(&server.serveraddr), @sizeOf(linux.sockaddr)));
+        this.serveraddr.family = linux.AF.INET;
+        this.serveraddr.port = htons(port);
+        this.serveraddr.addr = 0;
+        const sockbind = sysint(linux.bind(this.serverfd, @ptrCast(&this.serveraddr), @sizeOf(linux.sockaddr)));
         if (sockbind < 0) {
             return error.SocketBind;
         }
 
-        const listen = sysint(linux.listen(server.serverfd, 16));
+        const listen = sysint(linux.listen(this.serverfd, 16));
         if (listen < 0) {
             return error.MarkListen;
         }
-
-        server.uring = try linux.IO_Uring.init(queue_depth, 0);
-        server.contextpool = pool;
-        return server;
+        this.bound = true;
     }
 
     fn addAcceptRequest(this: *This) !void {
@@ -326,6 +338,10 @@ pub const IOServer = struct {
         );
     }
 
+    pub fn recv(this: *This, ctx: *ConnectionContext) !void {
+        try this.addReadRequest(ctx);
+    }
+
     fn addSendRequest(this: *This, ctx: *ConnectionContext) !void {
         if (ctx.is_sending or ctx.invalid) {
             return;
@@ -347,7 +363,7 @@ pub const IOServer = struct {
     }
 
     pub fn work(this: *This, can_sleep: bool) !IOEventIterator {
-        if (!this.accepting) {
+        if (this.bound and !this.accepting) {
             try this.addAcceptRequest();
             _ = try this.uring.submit();
             this.accepting = true;
@@ -380,10 +396,44 @@ pub const IOServer = struct {
         try this.addSendRequest(ctx);
     }
 
+    pub fn connect(this: *This, userdata: u64, port: u16) !void {
+        var context = this.contextpool.get() orelse return error.OutOfContexts;
+        var size: u32 = @sizeOf(linux.sockaddr);
+        var fd = sysint(linux.socket(linux.PF.INET, linux.SOCK.STREAM, linux.IPPROTO.TCP));
+        if (fd == -1) {
+            return error.SocketSetup;
+        }
+        context.userdata = userdata;
+        context.client_fd = fd;
+        var addr: *linux.sockaddr.in = @alignCast(@ptrCast(&context.client_addr));
+        addr.port = htons(port);
+        addr.addr = 0;
+        addr.family = linux.AF.INET;
+
+        _ = this.uring.connect(
+            (IORequest{ .contextid = context.poolid, .requesttype = .Open }).toInt(),
+            context.client_fd,
+            &context.client_addr,
+            size,
+        ) catch |err| {
+            this.contextpool.returnCtx(context);
+            return err;
+        };
+    }
+
     pub fn submit(this: *This) !void {
         _ = try this.uring.submit();
     }
 };
+
+pub fn htons(port: u16) u16 {
+    var p = port;
+    var bytes: [*]u8 = @ptrCast(&p);
+    var tmp = bytes[0];
+    bytes[0] = bytes[1];
+    bytes[1] = tmp;
+    return @as(*u16, @alignCast(@ptrCast(bytes))).*;
+}
 
 test "io.Buffer" {
     const expect = std.testing.expect;

@@ -297,10 +297,16 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
         std.debug.print("#{} failed to allocate IO Context pool: {s}\n", .{ worker_id, @errorName(err) });
         std.os.exit(0);
     };
-    var ring: io.IOServer = io.IOServer.init(ctxpool, @intCast(config.queue_depth), 3456) catch |err| {
+    var ring: io.IOServer = io.IOServer.init(ctxpool, @intCast(config.queue_depth)) catch |err| {
         std.debug.print("#{} failed to setup IO Uring: {s}\n", .{ worker_id, @errorName(err) });
         std.os.exit(0);
     };
+
+    ring.bind(3456) catch |err| {
+        std.debug.print("#{} failed to bind Server: {s}\n", .{ worker_id, @errorName(err) });
+        std.os.exit(0);
+    };
+
     var evt_loop = EventLoop().init(config.event_loop_limit, std.heap.page_allocator) catch |err| {
         std.debug.print("#{} failed to setup event loop: {s}\n", .{ worker_id, @errorName(err) });
         std.os.exit(0);
