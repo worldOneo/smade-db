@@ -119,7 +119,7 @@ pub const RespValue = struct {
     _pad: [2]usize = [2]usize{ 0, 0 },
 
     const This = @This();
-    pub fn flag(this: *This) Flag {
+    pub fn typeFlag(this: *This) Flag {
         return this.flag;
     }
 

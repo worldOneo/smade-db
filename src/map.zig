@@ -503,7 +503,7 @@ const startLevel: usize = 4;
 pub const ExtendibleMap = struct {
     dict: std.atomic.Atomic(*Dict),
     max_expansions: usize,
-    expansion_ptrs: [maxDictExpansions]lock.SimpleLock(*Dict),
+    expansion_ptrs: [maxDictExpansions]lock.OptLock(*Dict),
     expansions: [maxDictExpansions]Dict,
 
     const Dict = struct {
@@ -525,10 +525,7 @@ pub const ExtendibleMap = struct {
     }
 
     const AcquireState = struct {
-        queued: u32 = 0,
-        attempts: u32 = 0,
         hash: u64,
-        queued_at: ?*lock.OptLock(SmallMap) = null,
         this: *This,
     };
 
@@ -540,47 +537,24 @@ pub const ExtendibleMap = struct {
     pub const AcquireMachine = state.Machine(AcquireState, AcquireResult, struct {
         const Drive = state.Drive(AcquireResult);
         pub fn drive(s: *AcquireState) Drive {
-            s.attempts += 1;
-            if (s.queued_at) |_| {
-                if (s.queued_at.?.version.load(std.atomic.Ordering.Monotonic) & ((1 << 32) - 1) > s.queued) {
-                    std.debug.print("Just cant get queued: q = {} for lock = {*} with ver = {} h = {}\n", .{
-                        s.queued,
-                        s.queued_at,
-                        s.queued_at.?.version.load(std.atomic.Ordering.Monotonic),
-                        s.hash,
-                    });
-                }
-            }
-            if (s.queued_at) |queued_at| {
-                var qa = queued_at;
-                if (!qa.tryDeque(s.queued)) {
-                    return .Incomplete;
-                }
-            } else {
-                const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-                const idx = currentIdx(dict, s.hash);
-                var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-                s.queued_at = map_lock;
-                if (map_lock.queue()) |qslot| {
-                    s.queued = qslot;
-                    return .Incomplete;
-                }
-            }
-            // Dash Algorithm 3 line 11
-            // see ReadMachine
-            const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-            const new_idx = currentIdx(new_dict, s.hash);
-            const new_map_lock = new_dict.segments[new_idx].load(std.atomic.Ordering.Monotonic);
+            const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+            const idx = currentIdx(dict, s.hash);
+            var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            if (map_lock.tryLock()) |map| {
+                // Dash Algorithm 3 line 11
+                // see ReadMachine
 
-            if (s.queued_at.? != new_map_lock) {
-                s.queued_at.?.unlock();
-                s.queued_at = null;
-                return .Incomplete;
+                const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                const new_idx = currentIdx(new_dict, s.hash);
+                const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+
+                if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
+                    map_lock.unlock();
+                    return .Incomplete;
+                }
+                return Drive{ .Complete = .{ .map = map, .lock = map_lock } };
             }
-            return Drive{ .Complete = .{
-                .map = &s.queued_at.?.value,
-                .lock = s.queued_at.?,
-            } };
+            return .Incomplete;
         }
     });
 
@@ -595,9 +569,6 @@ pub const ExtendibleMap = struct {
         locks: []MAcquireItem,
         locks_acquired: usize,
         setup: bool = false,
-
-        queued_at: ?*lock.OptLock(SmallMap) = null,
-        queued: u32 = 0,
     };
 
     fn lock_sorter(_: void, a: MAcquireItem, b: MAcquireItem) bool {
@@ -626,81 +597,67 @@ pub const ExtendibleMap = struct {
                 s.setup = true;
             }
 
-            if (s.queued_at) |queued_at| {
-                var qa = queued_at;
-                if (!qa.tryDeque(s.queued)) {
-                    return .Incomplete;
-                }
-            } else {
-                if (s.locks[s.locks_acquired].lock == null) return Drive{ .Complete = {} };
-                const old_lock = s.locks[s.locks_acquired].lock.?;
+            if (s.locks[s.locks_acquired].lock == null) return Drive{ .Complete = {} };
+            const old_lock = s.locks[s.locks_acquired].lock.?;
 
-                // If old_lock == prev_lock it is already locked.
-                if (s.locks_acquired > 0 and old_lock == s.locks[s.locks_acquired - 1].lock.?) {
-                    s.locks_acquired += 1;
-                    return drive(s);
-                }
-
-                s.queued_at = old_lock;
-                if (old_lock.queue()) |slot| {
-                    s.queued = slot;
-                    return .Incomplete;
-                }
-            }
-
-            const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-            const old_hash = s.locks[s.locks_acquired].hash;
-            const idx = currentIdx(dict, old_hash);
-            const now_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-            if (now_lock != s.queued_at.?) {
-                // now the fun begins.
-
-                // first find the position to insert the new lock.
-                // for big arrays binary search could be used
-                var insert_idx: usize = 0;
-                while (lock_sorter({}, s.locks[insert_idx], MAcquireItem{ .hash = 0, .lock = now_lock })) : (insert_idx += 1) {}
-
-                // In the end remove oldlock and insert nowlock
-                if (insert_idx < s.locks_acquired) {
-                    // next unlock all acquired locks after that index
-                    for (insert_idx..s.locks_acquired) |i| {
-                        if (i > 0 and s.locks[i - 1].lock.? == s.locks[i].lock.?) continue;
-                        s.locks[i].lock.?.unlock();
-                    }
-
-                    // lock1|lock2|lock3|<oldlock>|lock4 ...
-                    //        idx
-                    //       Shift lock2 and lock3 up by one
-
-                    var top = s.locks_acquired;
-                    while (top > insert_idx) : (top -= 1) {
-                        s.locks[top] = s.locks[top - 1];
-                    }
-                } else if (insert_idx > s.locks_acquired) {
-                    // lock1|<oldlock>|lock2|lock3|lock4 ...
-                    //                        idx
-                    //       Shift lock2 and lock3 down by one
-                    //
-                    // If s.lock[insert_idx] == null then we must decrease insert idx by one
-                    // inorder to keep the new lock in a valid range:
-                    //
-                    // lock1|<oldlock>|lock2|lock3|null
-                    //                             idx
-                    if (s.locks[insert_idx].lock == null) insert_idx -= 1;
-                    for (s.locks_acquired..(insert_idx + 1)) |i| {
-                        s.locks[i] = s.locks[i + 1];
-                    }
-                }
-                s.locks[insert_idx].lock = now_lock;
-                s.locks[insert_idx].hash = old_hash;
-                s.locks_acquired = @min(insert_idx, s.locks_acquired);
-                s.queued_at.?.unlock();
-                s.queued_at = null;
+            // If old_lock == prev_lock it is already locked.
+            if (s.locks_acquired > 0 and old_lock == s.locks[s.locks_acquired - 1].lock.?) {
+                s.locks_acquired += 1;
                 return drive(s);
             }
-            s.locks_acquired += 1;
-            s.queued_at = null;
-            return drive(s);
+
+            if (old_lock.tryLock()) |_| {
+                const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                const old_hash = s.locks[s.locks_acquired].hash;
+                const idx = currentIdx(dict, old_hash);
+                const now_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+                if (now_lock != old_lock) {
+                    // now the fun begins.
+
+                    // first find the position to insert the new lock.
+                    // for big arrays binary search could be used
+                    var insert_idx: usize = 0;
+                    while (lock_sorter({}, s.locks[insert_idx], MAcquireItem{ .hash = 0, .lock = now_lock })) : (insert_idx += 1) {}
+
+                    // In the end remove oldlock and insert nowlock
+                    if (insert_idx < s.locks_acquired) {
+                        // next unlock all acquired locks after that index
+                        for (insert_idx..s.locks_acquired) |i| {
+                            if (i > 0 and s.locks[i - 1].lock.? == s.locks[i].lock.?) continue;
+                            s.locks[i].lock.?.unlock();
+                        }
+
+                        // lock1|lock2|lock3|<oldlock>|lock4 ...
+                        //        idx
+                        //       Shift lock2 and lock3 up by one
+
+                        var top = s.locks_acquired;
+                        while (top > insert_idx) : (top -= 1) {
+                            s.locks[top] = s.locks[top - 1];
+                        }
+                    } else if (insert_idx > s.locks_acquired) {
+                        // lock1|<oldlock>|lock2|lock3|lock4 ...
+                        //                        idx
+                        //       Shift lock2 and lock3 down by one
+                        //
+                        // We must decrease insert idx by one because it points at the next greater element.
+                        insert_idx -= 1;
+
+                        for (s.locks_acquired..(insert_idx + 1)) |i| {
+                            s.locks[i] = s.locks[i + 1];
+                        }
+                    }
+                    s.locks[insert_idx].lock = now_lock;
+                    s.locks[insert_idx].hash = old_hash;
+                    s.locks_acquired = @min(insert_idx, s.locks_acquired);
+                    old_lock.unlock();
+                    return drive(s);
+                }
+                s.locks_acquired += 1;
+                return drive(s);
+            }
+
+            return .Incomplete;
         }
     });
 
@@ -945,7 +902,9 @@ pub const ExtendibleMap = struct {
         small_map.fillFromSplit(&tmp, 0, 0, allocator);
         var second: *SmallMap = &second_map.value;
         second.fillFromSplit(&tmp, 1, 0, allocator);
-        if (second_map.queue() != null) unreachable;
+        while (second_map.tryLock() == null) {
+            // this isn't bussy as tryLock is uncontendet
+        }
 
         return SplitMachine.init(SplitState{
             .this = this,
@@ -968,7 +927,7 @@ pub const ExtendibleMap = struct {
             this.expansions[i].copied = false;
             this.expansions[i].level = 4 + i;
             this.expansions[i].segments = backing_slab[0..(16 * (one << @intCast(i)))];
-            this.expansion_ptrs[i] = lock.SimpleLock(*Dict).init(&this.expansions[i]);
+            this.expansion_ptrs[i] = lock.OptLock(*Dict).init(&this.expansions[i]);
         }
         // setup slab
         var first_map: *lock.OptLock(SmallMap) = local_allocator.allocate(lock.OptLock(SmallMap)) orelse return ExtendibleMapError.MapAllocation;
