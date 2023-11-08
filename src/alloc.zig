@@ -82,14 +82,17 @@ const Page = struct {
         this.size_class = sizeClass;
     }
 
+    fn threadGuard(this: *This) void {
+        if (std.Thread.getCurrentId() != this.thread_id) unreachable("Cross threading");
+    }
+
     // blocks must be the same for all allocations
     pub fn allocate(this: *This, comptime T: type, size: usize) ?*T {
+        this.threadGuard();
         this.used += 1;
         if (this.free_list) |free_list| {
             allocLog("thread {} allocating size {} ({s}) for page {*} from free list\n", .{ std.Thread.getCurrentId(), size, @typeName(T), this });
             const alloc = free_list;
-            if (@intFromPtr(free_list) == 0) unreachable;
-            if (@intFromPtr(this) == 0) unreachable;
             this.free_list = free_list.next;
             return @ptrCast(@alignCast(alloc));
         }
@@ -106,6 +109,7 @@ const Page = struct {
     }
 
     pub fn collect(this: *This) void {
+        this.threadGuard();
         allocLog("thread {} collecting page {*}\n", .{ std.Thread.getCurrentId(), this });
 
         if (this.free_list == null) {
@@ -152,7 +156,7 @@ const Page = struct {
                 ) == null) {
                     allocLog("thread {} local marking {*} as thread normal page\n", .{ std.Thread.getCurrentId(), this });
                     // return page to available to allocate state
-                    var size_class: *SizeClass = @ptrCast(this.size_class);
+                    var size_class: *SizeClass = this.size_class orelse unreachable;
                     size_class.add_page(this);
                 }
             }
@@ -207,6 +211,7 @@ const Page = struct {
     }
 
     pub fn markFull(this: *This) bool {
+        this.threadGuard();
         this.bump_idx = bumpMarkerFullPage;
         // mark page as full, if the page has items in the free list (thread_free != 0) it is not full anymore
         if (this.thread_free.compareAndSwap(
@@ -321,7 +326,7 @@ const SizeClass = struct {
                 // return this page for reuse anywhere else
                 this.unlinkPage(page);
                 this.global_allocator.freePage(page);
-            } else if (@intFromPtr(page.free_list) != 0) {
+            } else if (page.free_list != null) {
                 allocLog("thread {} allocating slow in size class {*} fast for page {*}\n", .{ std.Thread.getCurrentId(), this, page });
                 // This page can be used to allocate data
                 return page.allocate(T, n);
@@ -505,6 +510,7 @@ pub const GlobalAllocator = struct {
                 std.atomic.Ordering.Monotonic,
                 std.atomic.Ordering.Monotonic,
             ) == null) {
+                head_page.clear();
                 return head_page;
             }
             head = this.free_pages.load(std.atomic.Ordering.Acquire);
@@ -515,6 +521,7 @@ pub const GlobalAllocator = struct {
     pub fn freePage(this: *This, page: *Page) void {
         // atomic push to the queue
         var head = this.free_pages.load(std.atomic.Ordering.Monotonic);
+        page.clear();
         page.setNextPage(head);
         while (this.free_pages.compareAndSwap(
             head,
