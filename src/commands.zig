@@ -100,6 +100,7 @@ pub const MultiState = struct {
     command_count: usize = 0,
     commands_executed: usize = 0,
     shards_acquired: usize = 0,
+    calls: usize = 0,
 
     splitmachine: ?map.ExtendibleMap.SplitMachine = null,
     acquiremachine: ?map.ExtendibleMap.MAcquireMachine = null,
@@ -160,6 +161,7 @@ pub const MultiState = struct {
 
 pub const MultiMachine = state.Machine(MultiState, bool, struct {
     pub fn drive(s: *MultiState) state.Drive(bool) {
+        s.calls += 1;
         if (s.release) {
             // Step 3: Release all the shards held by the transaction
             //
@@ -228,6 +230,9 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
             if (acquiremachine.drive()) |_| {
                 s.shards_acquired = s.command_count;
                 s.acquiremachine = null;
+                s.calls = 0;
+            }
+            if (s.calls < 128) {
                 return drive(s);
             }
             return .Incomplete;
@@ -242,6 +247,9 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                 };
                 s.shards_acquired += 1;
                 s.splitmachine = null;
+                s.calls = 0;
+            }
+            if (s.calls < 128) {
                 return drive(s);
             }
             return .Incomplete;
