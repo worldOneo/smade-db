@@ -1,0 +1,57 @@
+scylla-sn:
+  type: Web
+  title: What is Shared Nothing Architecture? Definition & FAQs | Scylla
+  author: ScyllaDB
+  url: https://www.scylladb.com/glossary/shared-nothing-architecture/
+df:
+  type: Web
+  title: Dragonfly - The Fastest In-Memory Data Store
+  author: Dragonfly
+  url: https://www.dragonflydb.io/
+df-sn:
+  type: Web
+  title: dragonfly/docs/df-share-nothing.md at main · dragonflydb/dragonfly · GitHub
+  author: Dragonfly
+  url: https://github.com/dragonflydb/dragonfly/blob/main/docs/df-share-nothing.md
+df-dash:
+  type: Web
+  title: dragonfly/docs/dashtable.md at main · dragonflydb/dragonfly · GitHub
+  author: Dragonfly
+  url: https://github.com/dragonflydb/dragonfly/blob/main/docs/dashtable.md
+dash:
+  type: Web
+  title: "Dash: scalable hashing on persistent memory"
+  author: ["Baotong Lu", "Xiangpeng Hau", "Tianzheng Wang", "Eric Lo"]
+  date: 2020-04-01
+  doi: "10.14778/3389133.3389134"
+the-case-for-shared-nothing:
+  type: Web
+  title: The Case for Shared Nothing
+  author: Michael Stonebraker
+  location: Berkeley, Ca.
+  date: 1986
+  url: https://dsf.berkeley.edu/papers/hpts85-nothing.pdf
+redis:
+  type: Web
+  title: Redis | The Real-time Data Platform
+  author: Redis
+  url: https://redis.com/
+memtier:
+  type: Web
+  title: "memtier_benchmark: A High-Throughput Benchmarking Tool for Redis & Memcached"
+  author: Redis
+  url: https://redis.com/blog/memtier_benchmark-a-high-throughput-benchmarking-tool-for-redis-memcached/
+  date: 2013-07-02
+io-uring:
+  type: Web
+  title: Efficient IO with io_uring
+  author: Jens Axboe
+  url: https://kernel.dk/io_uring.pdf
+ziglang:
+  type: Web
+  title: Home ⚡ Zig Programming Language
+  url: https://ziglang.org/
+rust:
+  type: Web
+  title: Rust Programming Language
+  url: https://www.rust-lang.org/

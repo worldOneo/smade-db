@@ -5,3 +5,5 @@ main.o
 atillery/atillery
 loader.o
 loader
+*.pdf
+info.typ
