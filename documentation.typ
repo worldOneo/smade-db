@@ -150,7 +150,8 @@ Der Fingerabdruck sind dabei einfach die letzten 15bit des Hashes des Keys des E
 
 In @algo-bucket-find wird beschrieben, wie ich Vektoroperationen nutze um effizient die Indizes der Einträge finde.
 Dabei werden die existierenden Zusatzdaten mit dem Fingerabdruck Verglichen und all die Indizes wo die Fingerabdrücke gleich die dem Eintrag sind mit einem Integer der Form $1 << n$ beschrieben.
-Hierbei ist $n = 15-"index"$ wird dieser Vektor dann mit einer "Or"-Operation zu einem 16bit integer Reduziert befinden sich mögliche Indezes immer in den Indezies, wo der 16bit Integer eine 1 hat.
+Hierbei ist $n = 15-"index"$.
+Wird dieser Vektor dann mit einer "Or"-Operation zu einem 16bit integer Reduziert befinden sich mögliche Indizes immer in den Indezies, wo der 16bit Integer eine 1 hat.
 In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann das sehr effizient umgesetzt werden.
 
 #algo({
@@ -168,12 +169,43 @@ In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann da
   })
 }, caption: [Bucket-FindEntry]) <algo-bucket-find>
 
-Auf ähnliche Art und Weise können auch freie Indezes gesucht werden und Indezes gefunden werden, die Abgelaufen sind.
+Auf ähnliche Art und Weise können auch freie Indizes gesucht werden und Indizes gefunden werden, die Abgelaufen sind.
 Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 einträgen abzuarbeiten, da 256bit Vektoreinheiten  deutlich weiter Verbreitet sind als 512bit Vektor einheiten in x64 CPUs.
 
 == Darstellung von Datenbank-Werten
 
-== Memory Management
+Alle Werte, die in der Datenbank gespeichert werden haben das Format, welches in @layout-dbvalue dargestellt wird und insgesammt 24byte groß ist.
+
+#figure(
+  [#table(columns: (auto,1fr,), stroke: none, row-gutter: 5pt, align: left,
+    [String], [#math.overbrace([`CCCCCCCC`], "Capacity")#math.overbrace([`LLLLLLLL`], "Length")#math.overbrace([`PPPPPPPP`], "Pointer")],
+    [Short-String], [#math.overbrace([`DDDDDDDDDDDDDDDDDDDDDD`], "Data")`LF`],
+    [Liste], [#math.overbrace([`PPPPPPPP`], "Pointer")#math.overbrace([`LLLLLLLL`], "Length")#math.overbrace([`UUUUUUU`], "Unused")`F`],
+    [Andere], [#math.overbrace([`PPPPPPPP`], "Pointer")#math.overbrace([`UUUUUUUUUUUUUU`], "Unused")`FF`],
+  )
+  `F` entspricht "Flag" und Speichert um welchen Datentyp es sich handelt.
+  ], caption: "Datenbank-Werte", supplement: "Layout"
+) <layout-dbvalue>
+
+Hierbei handelt es sich um ein Union-Type der 3x8byte groß ist, wobei die letzten beiden Bits genutzt werden um die Typen der Union zu unterscheiden.
+Das geht, weil alle Daten von Strings in der Datenbank 8byte alligned sind und daher die Letzten beiden Bits eines gültigen Pointers immer 0 sind.
+Sind die Letzten beiden Bits 0, so handelt es sich also um einen String.
+Ist der letzte Bit 1, so handelt es sich um einen "Short-String", der seine Daten in der Datenstruktur selber Speichert anstatt als auf dem Heap.
+Ein Short-String kann bis zu 22bytes lang sein.
+Sind die letzten beiden Bits 1 so sind andere Datentypen beschrieben.
+Das kann eine (Linked-)Liste sein, die nur 2 der 8 byte Felder braucht um den Head als auch ihre Länge zu speichern oder auch viele andere Datentypen.
+
+== Memory-Management
+
+Für das Memory Management habe ich als Grundlage eine vereinfachte version von Microsofts mimalloc@mimalloc implementiert.
+Das ist Notwendig nicht nur aus dem Grund, das Zig noch keinen starken und allgemeinen Allocator bereit stellt, sondern auch daher, dass ich aufgrund der Share Everything Architektur besondere Anforderungen an mein Memory-Management habe.
+
+In der Share Everything Architektur stellt sich nähmlich im gegensatz zur Shared Nothing Architektur die Frage, wann es sicher ist Speicher wieder an das Betriebssystem zurück zu geben.
+Das Problem ist nähmlich, das ich aufgrund von der Verwendung von Optimistic-Concurrency gleichzeitig einen schreibenden und mehrere lesende Threads auf der gleichen Speicheradresse haben kann.
+Würde der schreibende Thread die Speicheradresse wieder zurück an das Betriebssystem geben wärend ein lesneder thread noch die Daten ließt würde es zu Fehlern kommen.
+Um diese Problem zu lösen habe ich mich dazu entschieden, dass kein Speicher jemals an das Betriebssystem zurück gegeben wird, sondern beim Start der Datenbank eine feste Menge an Speicher angegeben wird und von der Datenbank verwendet wird.
+
+Wenn ein schreibender Thread entscheidet Speicher frei zu geben wird dieser nur an den Allocator gegeben, der den Speicher nicht an das Betriebssystem zurück gibt aber wieder genutzt wird, wenn ein Thread wieder Speicher benötigt.
 
 == Concurrency und I/O
 
@@ -207,14 +239,14 @@ So kommt ein Thread garantiert dazu, das Lock zu Sperren.
       Assign([old], FnI[AtomicIncr][lock.h32])
       Assign([slot], [old.h32])
       Assign([pos], [old.l32])
-      If(cond: "slot+pos >= ROLLOVER", {
-        Assign([slot], [slot - ROLLOVER])
-      })
-      If(cond: "slot = pos", (
+      If(cond: "slot = 0", (
         FnI("AtomicIncr", "lock.l32"),
         Return([Acquired])
       ))
-      Else(Return([Queued: slot+pos]))
+      If(cond: "slot+(pos>>1) >= ROLLOVER", {
+        Assign([slot], [slot - ROLLOVER])
+      })
+      Return([Queued: slot+(pos>>1)])
     })
 }, caption: [QueueLock-Lock]) <algo-queue-lock>
 
@@ -222,9 +254,10 @@ So kommt ein Thread garantiert dazu, das Lock zu Sperren.
     import algorithmic: *
     Function("QueueLock-LockSlot", args: ("lock", "slot",), {
       Assign([old], FnI[AtomicLoad][lock])
-      If(cond: "slot = old.l32", {
+      If(cond: "slot << 1 = old.l32", (
+        FnI("AtomicIncr", "lock.l32"),
         Return[Acquired]
-      })
+      ))
       Return[Pending]
     })
 }, caption: [QueueLock-LockSlot]) <algo-queue-trylock>
@@ -238,6 +271,12 @@ So kommt ein Thread garantiert dazu, das Lock zu Sperren.
       })
     })
 }, caption: [QueueLock-Unlock]) <algo-queue-unlock>
+
+Optimistic-Concurrency ist mit diesem Lock einfach, in dem zu begin einer Lesenden operation die unteren 32bit des 64bit Locks als Version gespeichert werden.
+Ist die Version ungerade so ist das Lock gerade in einem schreibendem Modus gesperrt und die Lesende operation muss warten.
+Ist die Version gerade so kann die lesende Operation beginnen.
+Wenn die lesende Operation fertig ist muss sie nur die gespeicherte Version mit den unteren 32bit des Locks vergleichen.
+Sind diese unterschiedlich so muss die lesende Operation neu starten; sind sie gleich, so war die Operation erfolgreich.
 
 == Performance messen und vergleichen <ch-messen>
 

@@ -60,3 +60,9 @@ rust:
   type: Web
   title: Rust Programming Language
   url: https://www.rust-lang.org/
+mimalloc:
+  type: Web
+  title: "Mimalloc: Free List Sharding in Action"
+  url: https://www.microsoft.com/en-us/research/uploads/prod/2019/06/mimalloc-tr-v1.pdf
+  author: ["Daan Leijen", "Benjamin Zorn", "Leonardo de Moura"]
+  date: 2019-08
