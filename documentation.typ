@@ -1,6 +1,7 @@
 #import "info.typ" as info
 #import "@preview/algorithmic:0.1.0"
 #import algorithmic: algorithm
+#import "@preview/bob-draw:0.1.0": render
 
 #set text(lang: "de", font: "Times New Roman", size: 11pt)
 #let title = [Share Everything - Eine andere Architektur für Datenbanken]
@@ -144,7 +145,7 @@ In @layout-bucket ist dieses Layout einmal aufgezeigt.
     math.overbrace(table(columns: (1fr, 1fr, 0.7fr, 1fr),[Entry1],[Entry2],$dots$,[Entry16]), "16x48bytes"),
   ), caption: "Memory Layout eines Buckets", supplement: "Layout") <layout-bucket>
 
-Alle Daten eines Eintrages, zum Beispiel Eintrag1/Entry1, ergibt sich aus dem Betrachten der dazugehörigen Expiry und Zusatzdaten, also Meta1 und Expiry1. 
+Alle Daten eines Eintrages, zum Beispiel Eintrag1/Entry1, ergeben sich aus dem Betrachten der dazugehörigen Expiry und Zusatzdaten, also Meta1 und Expiry1. 
 Die Zusatzdaten bestehen aus einem 15bit Fingerabdruck des Eintrages und einem Bit der angiebt, ob der Eintrag hier existiert.
 Der Fingerabdruck sind dabei einfach die letzten 15bit des Hashes des Keys des Eintrages.
 
@@ -174,6 +175,73 @@ In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann da
 Auf ähnliche Art und Weise können auch freie Indizes gesucht werden und Indizes gefunden werden, die abgelaufen sind.
 Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor Unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 Einträgen abzuarbeiten, da 256bit Vektoreinheiten deutlich weiter verbreitet sind als 512bit Vektoreinheiten in x64 CPUs.
 
+18 Buckets werden in eine "SmallMap" zusammengefasst.
+18 Kommt daher, da die SmallMaps damit sehr gut in die Allocator-Page meines Allocators (siehe @ch-alloc) passen. 
+Die SmallMaps werden dann als Baustein genutzt um Dash aufzubauen und damit Extendible-Hashing zu betreiben.
+
+=== Vergrößern der Datenbank
+
+Auch beim vergrößern der Datenbank weiche ich von Dash ab.
+Im gegensatz zu Dash wird beim starten der Datenbank ein Limit an SmallMaps festgelegt.
+Damit wird die Directory, die alle SmallMaps speichert im Style von Extendible-Hashing, direkt am Anfang mit der maximalen Größe reserviert.
+Das verhindert nicht nur Latenz-Spikes, die aufgrund von unerwarteten Speicherreservirungen auftreten könnten, sondern ist so das Vergrößern auch deutlich einfacher.
+In @abb-dict-extension1 ist beispielhaft einmal eine Datenbank dargestellt, die auf 2 SmallMaps zeigt.
+
+#figure(
+render(```
+             1   2   3   4   5   6
+           +---+---+---+---+---+---+---+
+Directory: | * | * | O | O | O | O |...|
+           +-|-+-|-+---+---+---+---+---+
+             |   |
+             v   v
+            .+. .+.
+SmallMaps:  |_| |_|
+            |1| |2|
+            '-' '-'
+```), caption: [Directory for der Vergrößerung]
+) <abb-dict-extension1>
+
+Wenn die SmallMap 2 zu klein ist um Daten zu Speichern dann wird das Directory erst erweitert wie in @abb-dict-extension2 und danach wird die SmallMap aufgeteilt in eine neue SmallMap (in @abb-dict-extension3 SmallMap 3) und somit die Kapazität erhöht, was in @abb-dict-extension3 gezeigt ist.
+
+#figure(
+render(```
+             1   2   3   4   5   6
+           +---+---+---+---+---+---+---+
+Directory: | * | * | * | * | O | O |...|
+           +-|-+-|-+-|-+-|-+---+---+---+
+             |.~~+~~~'   :
+             |   |.~~~~~~'
+             |   |
+             v   v
+            .+. .+.
+SmallMaps:  |_| |_|
+            |1| |2|
+            '-' '-'
+```), caption: [Directory nach der Vergrößerung]
+) <abb-dict-extension2>
+
+#figure(
+render(```
+             1   2   3   4   5   6
+           +---+---+---+---+---+---+---+
+Directory: | * | * | * | * | O | O |...|
+           +-|-+-|-+-|-+-|-+---+---+---+
+             |.~~+~~~'   |
+             |   |       |
+             v   v       v
+            .+. .+.     .+.
+SmallMaps:  |_| |_|     |_|
+            |1| |2|     |3|
+            '-' '-'     '-'
+```), caption: [Directory hinzufügen einer weiteren SmallMap]
+) <abb-dict-extension3>
+
+Im unterschied zu Dash, da ich bereits die gesamte Größe des Directories reserviert habe, können alle Operationen bis auf die, die es erfordern, dass eine SmallMap aufgeteilt wird normal fortfahren.
+So werden die meisten Lese- und Schreiboperationen nicht blockiert.
+
+Damit verhindert wird, dass zwei Threads zur gleichen Zeit versuchen die Datenbank zu Vergrößern gibt es ein Flag, die mit Atomic-Operationen behandelt wird, gesetzt.
+Die Flag gibt an, dass die Datenbank aktuell vergrößert wird.
 
 == Darstellung von Datenbank-Werten
 
@@ -198,7 +266,7 @@ Ein Short-String kann bis zu 22bytes lang sein.
 Sind die letzten beiden Bits 1, so sind andere Datentypen beschrieben.
 Das kann eine (Linked-)Liste sein, die nur 2 der 8 byte Felder braucht, um den Head als auch ihre Länge zu speichern oder auch viele andere Datentypen.
 
-== Memory-Management
+== Memory-Management <ch-alloc>
 
 Für das Memory Management habe ich als Grundlage eine vereinfachte Version von Microsofts mimalloc@mimalloc implementiert.
 Das ist notwendig nicht nur aus dem Grund, dass Zig noch keinen starken und allgemeinen Allocator bereitstellt, sondern auch daher, dass ich aufgrund der Share Everything Architektur besondere Anforderungen an mein Memory-Management habe.
