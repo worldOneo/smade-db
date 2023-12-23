@@ -36,6 +36,11 @@ redis:
   title: Redis | The Real-time Data Platform
   author: Redis
   url: https://redis.com/
+redis-kv:
+  type: Web
+  author: Redis
+  title: What is a Key-Value Database? | Redis
+  url: https://redis.com/nosql/key-value-databases/
 memtier:
   type: Web
   title: "memtier_benchmark: A High-Throughput Benchmarking Tool for Redis & Memcached"

@@ -108,7 +108,10 @@ Hierbei wird eine bedingte Cache und Lock contention beim Zugriff auf die eigent
 
 Um die Fragen zu beantworten habe ich eine Datenbank implementiert, die in ihrer Funktionalität vergleichbar ist mit existierenden Datenbanken.
 Ich habe als Datenbank Redis@redis gewählt und die Alternativimplementation Dragonfly@df
-Redis dient hierbei als vergleich für eine einfach Kern Architektur und Dragonfly führ eine Shared-Nothing-Architektur die mit mehreren Kernen skalieren kann.
+Redis dient hierbei als Vergleich für eine Architektur mit nur einem Kern und Dragonfly für eine Shared-Nothing-Architektur die mit mehreren Kernen skalieren kann.
+
+Bei diesen Datenbanken handelt es sich um Key-Value Datenbanken@redis-kv die sich aufgrund ihrer Einheitlichkeit gut für einen Vergleichen eignen.
+Eine Key-Value Datenbank kann vereinfacht als eine Hashmap über das Netzwerk beschrieben werden und ich werde daher Begriffe die mit Hashmaps assoziiert sind in bezug auf die Datenbanken nutzen. 
 
 == Programmiersprache
 
@@ -124,6 +127,53 @@ Um einen parallelen Zugriff zu ermöglichen habe ich mich an dem Design von Dash
 Auch Dragonfly orientiert sich an diesem Design doch nutzt Dragonfly Dash nicht um parallelen Zugriff zu ermöglichen sondern um einen effizienten Speicher auf einem Kern bereit zu stellen.@df-dash
 Dash ist eine Datenstruktur die auf Extendible-Hashing basiert allerdings für parallelen Zugriff optimiert ist und ins besondere darauf, dass möglichst wenig Speicher geschrieben werden muss.
 Da Dash allerdings eine Recht ausführliche Datenstruktur ist habe ich es mir erlaubt diese an mehreren stellen zu vereinfachen.
+
+=== Buckets
+
+Dash beschreibt, wie Buckets Implementiert werden können doch habe ich meine Buckets anders implementiert, um diese einfach und effizient zu gestallten.
+Ein Bucket hat dabei maximal 16 Einträge.
+Für jeden Eintrag gibt es 16bit an Zusatzdaten und ein 32bit Expiry-Zeitpunkt.
+Die Zusatzdaten, Expiry-Zeitpunkte, und Einträge sind dabei alle jeweils in einem kontinuirlichen Array abgebildet.
+Das ist daher wichtig, dass so die Zusatzdaten und Expiry-Einträge mit Vektoroperationen durchsucht werden können. 
+In @layout-bucket ist dieses Layout einmal aufgezeigt.
+
+#figure(
+  table(columns: (1fr,), stroke: none, row-gutter: 5pt,
+    math.overbrace(table(columns: (1fr, 1fr, 0.7fr, 1fr),[Meta1],[Meta1],$dots$,[Meta16]), "16x2bytes"),
+    math.overbrace(table(columns: (1fr, 1fr, 0.7fr, 1fr),[Expiry1],[Expiry2],$dots$,[Expiry16]), "16x4bytes"),
+    math.overbrace(table(columns: (1fr, 1fr, 0.7fr, 1fr),[Entry1],[Entry2],$dots$,[Entry16]), "16x48bytes"),
+  ), caption: "Memory Layout eines Buckets", supplement: "Layout") <layout-bucket>
+
+Alle Daten eines Eintrages, zum Beispiel Eintrag1/Entry1, ergibt sich aus dem Betrachten der dazugehörigen Expiry und Zusatzdaten, also Meta1 und Expiry1. 
+Die Zusatzdaten bestehen aus einem 15bit Fingerabdruck des Eintrages und einem Bit der angiebt, ob der Eintrag hier existiert.
+Der Fingerabdruck sind dabei einfach die letzten 15bit des Hashes des Keys des Eintrages.
+
+In @algo-bucket-find wird beschrieben, wie ich Vektoroperationen nutze um effizient die Indizes der Einträge finde.
+Dabei werden die existierenden Zusatzdaten mit dem Fingerabdruck Verglichen und all die Indizes wo die Fingerabdrücke gleich die dem Eintrag sind mit einem Integer der Form $1 << n$ beschrieben.
+Hierbei ist $n = 15-"index"$ wird dieser Vektor dann mit einer "Or"-Operation zu einem 16bit integer Reduziert befinden sich mögliche Indezes immer in den Indezies, wo der 16bit Integer eine 1 hat.
+In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann das sehr effizient umgesetzt werden.
+
+#algo({
+  import algorithmic: *
+  Assign([msb_idx], [Vec16x2{1 << 15, ..., 1 << 0}])
+  State[]
+  Function("Bucket-FindEntry", args: ("bucket", "hash"), {
+    Assign([vec_a], FnI([VecLoad16x2], [bucket.meta]))
+    Assign([fingerprint], [(hash&0x7fff << 1) | 1])
+    Assign([vec_b], FnI([VecFill16x2], [fingerprint]))
+    Assign([eq_mask], FnI([VecEq], [vec_a, vec_b]))
+    Assign([selected], FnI([VecSelect], [eq_mask, msb_idx]))
+    Assign([msb_int], FnI[VecReduceOr][selected])
+    Return[msb_int]
+  })
+}, caption: [Bucket-FindEntry]) <algo-bucket-find>
+
+Auf ähnliche Art und Weise können auch freie Indezes gesucht werden und Indezes gefunden werden, die Abgelaufen sind.
+Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 einträgen abzuarbeiten, da 256bit Vektoreinheiten  deutlich weiter Verbreitet sind als 512bit Vektor einheiten in x64 CPUs.
+
+== Darstellung von Datenbank-Werten
+
+== Memory Management
 
 == Concurrency und I/O
 
@@ -219,8 +269,10 @@ Die Latenz-Metriken (Durchschnitt, p50 etc. etc.) ergeben sich aus der Agregatio
 
 Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen durchgeführt woraus die Skalierbarkeit abgelitten werden kann.
 
-
 = Ergebnisse
+
+Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
+Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen oder Noisy-Neighbours zu verhindern.
 
 = Ergebnissdiskussion
 
@@ -232,3 +284,5 @@ Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen dur
 #pagebreak()
 
 #bibliography("biblio.yaml", style: "cell")
+
+#set page(columns: 1)
