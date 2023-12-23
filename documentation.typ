@@ -148,8 +148,10 @@ Alle Daten eines Eintrages, zum Beispiel Eintrag1/Entry1, ergibt sich aus dem Be
 Die Zusatzdaten bestehen aus einem 15bit Fingerabdruck des Eintrages und einem Bit der angiebt, ob der Eintrag hier existiert.
 Der Fingerabdruck sind dabei einfach die letzten 15bit des Hashes des Keys des Eintrages.
 
-In @algo-bucket-find wird beschrieben, wie ich Vektoroperationen nutze um effizient die Indizes der Einträge finde.
-Dabei werden die existierenden Zusatzdaten mit dem Fingerabdruck Verglichen und all die Indizes wo die Fingerabdrücke gleich die dem Eintrag sind mit einem Integer der Form $1 << n$ beschrieben.
+In @algo-bucket-find wird beschrieben, wie ich Vektoroperationen nutze um effizient die Indizes der Einträge finde, wenn ein Hash von einem gesuchten Eintrag gegeben ist.
+Es werden für die Zusatzdaten in einem Vektor mit den Dimensionen $16 "Einträge" times 2 "Byte"$ genutzt.
+Dabei werden die existierenden Zusatzdaten mit dem Fingerabdruck des Eintrags verglichen nachdem gesucht wird.
+Alle Indizes des Vektors wo die Fingerabdrücke des Eintrags der Suche gleich die dem Eintrags in dem Bucket sind werden mit einem Integer der Form $1 << n$ gefüllt.
 Hierbei ist $n = 15-"index"$.
 Wird dieser Vektor dann mit einer "Or"-Operation zu einem 16bit integer Reduziert befinden sich mögliche Indizes immer in den Indezies, wo der 16bit Integer eine 1 hat.
 In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann das sehr effizient umgesetzt werden.
@@ -169,8 +171,9 @@ In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann da
   })
 }, caption: [Bucket-FindEntry]) <algo-bucket-find>
 
-Auf ähnliche Art und Weise können auch freie Indizes gesucht werden und Indizes gefunden werden, die Abgelaufen sind.
-Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 einträgen abzuarbeiten, da 256bit Vektoreinheiten  deutlich weiter Verbreitet sind als 512bit Vektor einheiten in x64 CPUs.
+Auf ähnliche Art und Weise können auch freie Indizes gesucht werden und Indizes gefunden werden, die abgelaufen sind.
+Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor Unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 Einträgen abzuarbeiten, da 256bit Vektoreinheiten deutlich weiter verbreitet sind als 512bit Vektoreinheiten in x64 CPUs.
+
 
 == Darstellung von Datenbank-Werten
 
@@ -183,29 +186,29 @@ Alle Werte, die in der Datenbank gespeichert werden haben das Format, welches in
     [Liste], [#math.overbrace([`PPPPPPPP`], "Pointer")#math.overbrace([`LLLLLLLL`], "Length")#math.overbrace([`UUUUUUU`], "Unused")`F`],
     [Andere], [#math.overbrace([`PPPPPPPP`], "Pointer")#math.overbrace([`UUUUUUUUUUUUUU`], "Unused")`FF`],
   )
-  `F` entspricht "Flag" und Speichert um welchen Datentyp es sich handelt.
+  `F` entspricht "Flag" und speichert, um welchen Datentyp es sich handelt.
   ], caption: "Datenbank-Werte", supplement: "Layout"
 ) <layout-dbvalue>
 
-Hierbei handelt es sich um ein Union-Type der 3x8byte groß ist, wobei die letzten beiden Bits genutzt werden um die Typen der Union zu unterscheiden.
-Das geht, weil alle Daten von Strings in der Datenbank 8byte alligned sind und daher die Letzten beiden Bits eines gültigen Pointers immer 0 sind.
-Sind die Letzten beiden Bits 0, so handelt es sich also um einen String.
-Ist der letzte Bit 1, so handelt es sich um einen "Short-String", der seine Daten in der Datenstruktur selber Speichert anstatt als auf dem Heap.
+Hierbei handelt es sich um einen Union-Type, der 3x8byte groß ist, wobei die letzten beiden Bits genutzt werden, um die Typen der Union zu unterscheiden.
+Das geht, weil alle Daten von Strings in der Datenbank 8byte alligned sind und daher die letzten beiden Bits eines gültigen Pointers immer 0 sind.
+Sind die letzten beiden Bits 0, so handelt es sich also um einen String.
+Ist der letzte Bit 1, so handelt es sich um einen "Short-String", der seine Daten in der Datenstruktur selber speichert anstatt als auf dem Heap.
 Ein Short-String kann bis zu 22bytes lang sein.
-Sind die letzten beiden Bits 1 so sind andere Datentypen beschrieben.
-Das kann eine (Linked-)Liste sein, die nur 2 der 8 byte Felder braucht um den Head als auch ihre Länge zu speichern oder auch viele andere Datentypen.
+Sind die letzten beiden Bits 1, so sind andere Datentypen beschrieben.
+Das kann eine (Linked-)Liste sein, die nur 2 der 8 byte Felder braucht, um den Head als auch ihre Länge zu speichern oder auch viele andere Datentypen.
 
 == Memory-Management
 
-Für das Memory Management habe ich als Grundlage eine vereinfachte version von Microsofts mimalloc@mimalloc implementiert.
-Das ist Notwendig nicht nur aus dem Grund, das Zig noch keinen starken und allgemeinen Allocator bereit stellt, sondern auch daher, dass ich aufgrund der Share Everything Architektur besondere Anforderungen an mein Memory-Management habe.
+Für das Memory Management habe ich als Grundlage eine vereinfachte Version von Microsofts mimalloc@mimalloc implementiert.
+Das ist notwendig nicht nur aus dem Grund, dass Zig noch keinen starken und allgemeinen Allocator bereitstellt, sondern auch daher, dass ich aufgrund der Share Everything Architektur besondere Anforderungen an mein Memory-Management habe.
 
-In der Share Everything Architektur stellt sich nähmlich im gegensatz zur Shared Nothing Architektur die Frage, wann es sicher ist Speicher wieder an das Betriebssystem zurück zu geben.
-Das Problem ist nähmlich, das ich aufgrund von der Verwendung von Optimistic-Concurrency gleichzeitig einen schreibenden und mehrere lesende Threads auf der gleichen Speicheradresse haben kann.
-Würde der schreibende Thread die Speicheradresse wieder zurück an das Betriebssystem geben wärend ein lesneder thread noch die Daten ließt würde es zu Fehlern kommen.
-Um diese Problem zu lösen habe ich mich dazu entschieden, dass kein Speicher jemals an das Betriebssystem zurück gegeben wird, sondern beim Start der Datenbank eine feste Menge an Speicher angegeben wird und von der Datenbank verwendet wird.
+In der Share Everything Architektur stellt sich nämlich im Gegensatz zur Shared Nothing Architektur die Frage, wann es sicher ist, Speicher wieder an das Betriebssystem zurück zu geben.
+Das Problem ist nämlich, dass ich aufgrund von der Verwendung von Optimistic-Concurrency gleichzeitig einen schreibenden und mehrere lesende Threads auf der gleichen Speicheradresse haben kann.
+Würde der schreibende Thread die Speicheradresse wieder zurück an das Betriebssystem geben, während ein lesender Thread noch die Daten liest, würde es zu Fehlern kommen.
+Um dieses Problem zu lösen, habe ich mich dazu entschieden, dass kein Speicher jemals an das Betriebssystem zurückgegeben wird, sondern beim Start der Datenbank eine feste Menge an Speicher angegeben wird und von der Datenbank verwendet wird.
 
-Wenn ein schreibender Thread entscheidet Speicher frei zu geben wird dieser nur an den Allocator gegeben, der den Speicher nicht an das Betriebssystem zurück gibt aber wieder genutzt wird, wenn ein Thread wieder Speicher benötigt.
+Wenn ein schreibender Thread entscheidet, Speicher freizugeben, wird dieser nur an den Allocator gegeben, der den Speicher nicht an das Betriebssystem zurückgibt, aber wieder genutzt wird, wenn ein Thread wieder Speicher benötigt.
 
 == Concurrency und I/O
 
@@ -213,6 +216,8 @@ Meine umsetzung der Datenbank orientiert sich an modernen Concurrency und I/O mo
 Da ich meine Datenbank in der Programmiersprache Zig implemtiere und diese zu diesen Zeitpunkt noch keine fertige untertützung für async/await hatte habe ich mich dazu entschieden, Concurrency mit der Hilfe von State-Machines zu implementieren.
 Diese State-Machines werden in einem Event-Loop pro Thread immer wieder aufgerufen und können so schrittweise Fortschritt erreichen, ohne den Thread durchgängig zu blockieren.
 So kann eine State-Machine die Versucht ein Lock zu Sperren speichern, dass die State-Machine an diesem Punkt weiter machen muss und die Kontrolle zurück an den Event-Loop geben, der die State-Machine zu einem späteren Zeitpunkt wieder Aufruft.
+
+
 
 == Queue Lock <ch-queue>
 
