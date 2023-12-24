@@ -66,3 +66,8 @@ mimalloc:
   url: https://www.microsoft.com/en-us/research/uploads/prod/2019/06/mimalloc-tr-v1.pdf
   author: ["Daan Leijen", "Benjamin Zorn", "Leonardo de Moura"]
   date: 2019-08
+vll:
+  type: Article
+  title: "Lightweight Locking for Main Memory Database Systems"
+  author: ["Kun Ren", "Alexander Thomson", "Daniel J. Abadi"]
+  url: https://www.cs.umd.edu/~abadi/papers/vll-vldb13.pdf

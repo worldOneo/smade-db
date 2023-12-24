@@ -87,9 +87,9 @@ Im allgemeinen kann gesagt werden, dass umso weniger Contention stattfindet, ums
 
 == Shared Nothing
 
-Share Nothing basiert auf der Idee, dass es sehr effizient ist, keine Synchronisation von Daten oder die Zugriffe auf diese Daten zu benötigen.
+Share Nothing basiert auf der Idee, dass es sehr effizient ist, keine Synchronisation von Daten oder von Zugriffen auf Daten zu benötigen.
 In dieser Architectur werden nähmlich keine Daten zwischen mehreren Prozessen geteilt was dazu führen soll, dass nicht nur der Programmfluss vereinfacht wird,
-sondern sich auch näher an der Hardware orientiert.
+sondern Programme auch effizienter Arbeiten können.
 So muss die CPU, Beispielsweise, weniger Arbeit in Cache-Coherency oder in Atomic Operationen stecken, wenn es keinen geteilten Arbeitsspeicher gibt.
 Auch soll so die Skalierbarkeit von Anwendungen erhöht werden, da die angesprochenen Probleme tendenziell mit höheren Zahlen an CPU Kernen nur größer werden. @the-case-for-shared-nothing
 
@@ -179,7 +179,7 @@ Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen au
 18 Kommt daher, da die SmallMaps damit sehr gut in die Allocator-Page meines Allocators (siehe @ch-alloc) passen. 
 Die SmallMaps werden dann als Baustein genutzt um Dash aufzubauen und damit Extendible-Hashing zu betreiben.
 
-=== Vergrößern der Datenbank
+=== Vergrößern der Datenbank <ch-extend>
 
 Auch beim vergrößern der Datenbank weiche ich von Dash ab.
 Im gegensatz zu Dash wird beim starten der Datenbank ein Limit an SmallMaps festgelegt.
@@ -197,12 +197,16 @@ Directory: | * | * | O | O | O | O |...|
              v   v
             .+. .+.
 SmallMaps:  |_| |_|
-            |1| |2|
+            | | | |
             '-' '-'
+             1   2
 ```), caption: [Directory for der Vergrößerung]
 ) <abb-dict-extension1>
 
-Wenn die SmallMap 2 zu klein ist um Daten zu Speichern dann wird das Directory erst erweitert wie in @abb-dict-extension2 und danach wird die SmallMap aufgeteilt in eine neue SmallMap (in @abb-dict-extension3 SmallMap 3) und somit die Kapazität erhöht, was in @abb-dict-extension3 gezeigt ist.
+Wenn die SmallMap 2 zu klein ist um Daten zu Speichern dann wird das Directory erst erweitert wie in @abb-dict-extension2.
+Hierbei werden die Pointer des Directories auf die bereits existierenden SmallMaps gesetzt.
+Danach wird die SmallMap aufgeteilt in eine neue SmallMap.
+In @abb-dict-extension3 wird veranschaulicht, wie die SmallMap 3 hinzugefügt wird und somit die Kapazität erhöht wird.
 
 #figure(
 render(```
@@ -216,8 +220,9 @@ Directory: | * | * | * | * | O | O |...|
              v   v
             .+. .+.
 SmallMaps:  |_| |_|
-            |1| |2|
+            | | | |
             '-' '-'
+             1   2
 ```), caption: [Directory nach der Vergrößerung]
 ) <abb-dict-extension2>
 
@@ -232,12 +237,13 @@ Directory: | * | * | * | * | O | O |...|
              v   v       v
             .+. .+.     .+.
 SmallMaps:  |_| |_|     |_|
-            |1| |2|     |3|
+            | | | |     | |
             '-' '-'     '-'
+             1   2       3
 ```), caption: [Directory hinzufügen einer weiteren SmallMap]
 ) <abb-dict-extension3>
 
-Im unterschied zu Dash, da ich bereits die gesamte Größe des Directories reserviert habe, können alle Operationen bis auf die, die es erfordern, dass eine SmallMap aufgeteilt wird normal fortfahren.
+Im unterschied zu Dash, da ich bereits die gesamte Größe des Directories reserviert habe, können alle Operationen bis auf die, die es erfordern, dass eine SmallMap aufgeteilt wird normal fortfahren wärend das Directory erweitert wird.
 So werden die meisten Lese- und Schreiboperationen nicht blockiert.
 
 Damit verhindert wird, dass zwei Threads zur gleichen Zeit versuchen die Datenbank zu Vergrößern gibt es ein Flag, die mit Atomic-Operationen behandelt wird, gesetzt.
@@ -351,6 +357,23 @@ Ist die Version gerade so kann die lesende Operation beginnen.
 Wenn die lesende Operation fertig ist muss sie nur die gespeicherte Version mit den unteren 32bit des Locks vergleichen.
 Sind diese unterschiedlich so muss die lesende Operation neu starten; sind sie gleich, so war die Operation erfolgreich.
 
+== Vielschrittige Transaktionen
+
+Vielschrittige Transaktionen sind Datenbankoperationen die in einer Transaktion mehrere Operationen so ausführen, dass sie für den Rest der Datenbank als eine einzige Operation wirken.
+Wenn eine Transaktion beispielsweise die Schritte beinhaltet "Setze A auf 1 und B auf 2" und A und B vorher 0 wahren, so gibt es keinen Zeitpunkt an dem A als 1 und B als 0 oder A als 0 und B als 2 gelesen werden kann.
+Es kann nur A als 0 und B als 0 oder A als 1 und B als 2 gelesen werden.
+
+Damit solche Transaktionen in einer Datenbank effizient koordiniert werden, wird oft auf Lock-Manager wie VLL @vll, der auch in Dragonfly genutzt wird, zurückgegriffen.
+Auf der Suche nach einem angemessenen Lock-Manager ist mir aufgefallen, dass nur wenige für meine gewählte Architektur passend sind und diese oft recht komplizierte Algorithmen nutzen.
+Daher habe ich mich dazu entschieden, ein eigenes Transaktionsscheme zu entwickeln, welches möglichst gut auf meine Datenbank passt.
+
+Mein Transaktionsschema funktioniert so:
+  + Alle SmallMaps, die für die Transaktion benötigt werden, werden als Pointer aus dem Directory geladen und in ein Array gespeichert.
+  + Die SmallMaps werden nach ihrem Pointerwert in aufsteigender Reihenfolge sortiert.
+  + Die Locks der SmallMaps werden in der Reihenfolge nun aufsteigend gesperrt. Es kann passieren, dass eine Falsche SmallMap gesperrt wird, da zwischen Punkt 1 und dem Sperren der SmallMap der Wert, der für die Transaktion erforderlich ist, nach dem in @ch-extend beschrieben Verfahren, nun in einer anderen SmallMap ist, dann wird die falsch gesperrte SmallMap einfach wieder entsperrt und die richtige SmallMap gesucht und in das sortierte Array an die richtige stelle eingefügt. 
+
+Bei Punkt 3 ist anzumerken, dass alle bereits gesperrten Pointer, die einen größeren Wert haben als der neu geladene, wieder entsperrt werden müssen, um Raceconditions zu vermeiden.
+
 == Performance messen und vergleichen <ch-messen>
 
 Das Messen der Performance hat sich als schwieriger als erwartet herausgestellt.
@@ -368,7 +391,7 @@ Für den Vergleich habe ich also diese Metriken ausgewählt in diesen Einheiten:
   
   - Latenz in $mu s$ für Durschnitt, p50, p80, p90, p99, p99.9, p99.995, und p99.999
   - Durchsatzleistung in Queries pro Sekunde (QPS)
-  - Skalierbarkeit in $%$. Sie einheit Ergibt sich aus der folgenden Rechnung: $"Skalierbarkeit" = "QPS mit N Kernen"/"QPS mit 1 Kern"$
+  - Skalierbarkeit in $%$. Sie ergibt sich aus der folgenden Rechnung: $"Skalierbarkeit" = "QPS mit N Kernen"/"QPS mit 1 Kern"$
 
 Gemessen wurden diese Metriken so:
 
@@ -384,7 +407,7 @@ Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen dur
 = Ergebnisse
 
 Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
-Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen oder Noisy-Neighbours zu verhindern.
+Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen, Golden Samples, oder Noisy-Neighbours zu vermeiden.
 
 = Ergebnissdiskussion
 
@@ -395,6 +418,6 @@ Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der s
 
 #pagebreak()
 
-#bibliography("biblio.yaml", style: "cell")
+#bibliography("biblio.yaml")
 
 #set page(columns: 1)
