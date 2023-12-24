@@ -416,6 +416,13 @@ Die Latenz-Metriken (Durchschnitt, p50 etc. etc.) ergeben sich aus der Agregatio
 
 Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen durchgeführt woraus die Skalierbarkeit abgelitten werden kann.
 
+Außerdem müssen mehrere Workloads getestet werden, um verschiedene Scenarien zu simulieren.
+Ich habe mich für 8 verschiedene Workloads entschieden die ein breites Spektrum an Fällen simulieren sollen:
+  + 8 Pipelined inserts. Das ist ein writeonly Test, der passieren kann, wenn z.B. eine Datenbank von einer anderen Quelle befüllt wird.
+  + 90% Read, 10% Write. Das ist ein Workload was sehr Typisch ist, da typischer weise deutlich mehr Daten abgerufen werden als sie geschrieben werden. Dieses Workload wird sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet (um hotspots zu simulieren) und in beiden Fällen mit einer Pipeline von 1 und 8 getestet.
+  + 10% Read, 90% Write. Dieses Workload ist eher untypisch aber relevant um zu erkennen, ob lese Operationen möglicherweise von Schreiboperationen verdrängt werden. Dieses workload wird auch sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet.
+  + 8 writes in einer Transaktion. Dieses Workload überprüft die Performance bei vielen langlaufenden Transaktionen.
+
 = Ergebnisse
 
 Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
