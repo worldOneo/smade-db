@@ -107,8 +107,7 @@ Hierbei wird eine bedingte Cache und Lock contention beim Zugriff auf die eigent
 
 = Vorgehensweise, Materialien und Methoden
 
-Um die Fragen zu beantworten habe ich eine Datenbank implementiert, die in ihrer Funktionalität vergleichbar ist mit existierenden Datenbanken.
-Ich habe als Datenbank Redis@redis gewählt und die Alternativimplementation Dragonfly@df
+Um die Fragen zu beantworten habe ich eine Datenbank implementiert, die in ihrer Funktionalität vergleichbar ist mit den existierenden Datenbanken  Redis @redis gewählt und die Alternativimplementation Dragonfly @df.
 Redis dient hierbei als Vergleich für eine Architektur mit nur einem Kern und Dragonfly für eine Shared-Nothing-Architektur die mit mehreren Kernen skalieren kann.
 
 Bei diesen Datenbanken handelt es sich um Key-Value Datenbanken@redis-kv die sich aufgrund ihrer Einheitlichkeit gut für einen Vergleichen eignen.
@@ -120,7 +119,7 @@ Für die Implementation der Datenbank habe ich verschiedene Programmiersprache i
 Da die Datenbank vergleichbar sein muss mit Redis und Dragonfly muss sie in einer vergleichbaren Sprache umgesetzt werden, die nicht zusätzliche Hürden wie einen Garbage Collector oder JIT Compiler einführt.
 
 Die Sprachen die Sinvoll schienen waren C, C++, Rust@rust, und Zig@ziglang.
-Ich habe mich für Zig entschieden, da sie recht sicher und intuitiv ist im Vergleich zu C und C++, generische Typen erlaubt im Vergleich zu C, und nicht so viele Probleme bereitet wie Rust wenn es darum geht, Daten willkürlich zwischen mehreren Threads zu Teilen.
+Ich habe mich für Zig entschieden, da sie recht simple ist im Vergleich zu C++, generische Typen erlaubt im Gegensatz zu C, und nicht so viele Probleme bereitet wie Rust wenn es darum geht, Daten willkürlich zwischen mehreren Threads zu Teilen.
 
 == Dash <ch-dash>
 
@@ -174,7 +173,6 @@ In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann da
 
 Auf ähnliche Art und Weise können auch freie Indizes gesucht werden und Indizes gefunden werden, die abgelaufen sind.
 Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor Unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 Einträgen abzuarbeiten, da 256bit Vektoreinheiten deutlich weiter verbreitet sind als 512bit Vektoreinheiten in x64 CPUs.
-
 
 === SmallMap
 
@@ -292,12 +290,10 @@ Wenn ein schreibender Thread entscheidet, Speicher freizugeben, wird dieser nur 
 
 == Concurrency und I/O
 
-Meine umsetzung der Datenbank orientiert sich an modernen Concurrency und I/O modellen und nutzt für Concurrency, aufgrund von mangel an async/await support, State-Machines und für I/O die asynchrone API io_uring@io-uring.
+Meine umsetzung der Datenbank orientiert sich an modernen Concurrency und I/O modellen und nutzt für Concurrency State-Machines und für I/O die asynchrone API io_uring@io-uring.
 Da ich meine Datenbank in der Programmiersprache Zig implemtiere und diese zu diesen Zeitpunkt noch keine fertige untertützung für async/await hatte habe ich mich dazu entschieden, Concurrency mit der Hilfe von State-Machines zu implementieren.
 Diese State-Machines werden in einem Event-Loop pro Thread immer wieder aufgerufen und können so schrittweise Fortschritt erreichen, ohne den Thread durchgängig zu blockieren.
 So kann eine State-Machine die Versucht ein Lock zu Sperren speichern, dass die State-Machine an diesem Punkt weiter machen muss und die Kontrolle zurück an den Event-Loop geben, der die State-Machine zu einem späteren Zeitpunkt wieder Aufruft.
-
-
 
 == Queue Lock <ch-queue>
 
@@ -312,8 +308,8 @@ Bei dem Queue-Lock gibt es die garantierte Reihenfolge, was in @algo-queue-lock 
 Hierbei wird ein 64bit Intger als lock genutzt wie zwei 32bit Integern ($l 32 eq.est $ Low 32 bits und $h 32 eq.est $ High 32 bits).
 Das Queue-Lock kann als Warteschlange betrachtet werden, daher auch der Name.
 In den high 32 bits wird gespeichert, wie viele noch vor einem in der Schlange stehen und in den low 32 bits wird gespeichert, der wie vielte gerade drann ist.
-Wenn sich ein Thread in die Schlange einreiht (die high 32 bits erhöhen um 1) gibt es zwei Möglichkeiten: Entweder jemand ist vor dir, oder nicht.
-Hierbei gilt auch als "jemand vor dir", wenn jemand gerade an der Reihe ist.
+Wenn sich ein Thread in die Schlange einreiht (die high 32 bits erhöhen um 1) gibt es zwei Möglichkeiten: Entweder ein anderer Thread ist vor dem eigenen Thread, oder nicht.
+Hierbei gilt auch als "vor dem eigenen Thread", wenn ein Thread gerade an der Reihe ist.
 Wenn jemand gerade vor einem ist kann man regelmäßig prüfen, ob so viele nun an der Reihe waren (siehe @algo-queue-trylock).
 Wenn niemand vor einem ist, ist man selber an der Reihe.
 So kommt ein Thread garantiert dazu, das Lock zu Sperren. 
@@ -365,12 +361,12 @@ Sind diese unterschiedlich so muss die lesende Operation neu starten; sind sie g
 
 == Vielschrittige Transaktionen
 
-Vielschrittige Transaktionen sind Datenbankoperationen die in einer Transaktion mehrere Operationen so ausführen, dass sie für den Rest der Datenbank als eine einzige Operation wirken.
+Vielschrittige Transaktionen sind Datenbankoperationen, die in einer Transaktion mehrere Operationen so ausführen, dass sie für den Rest der Datenbank als eine einzige Operation wirken.
 Wenn eine Transaktion beispielsweise die Schritte beinhaltet "Setze A auf 1 und B auf 2" und A und B vorher 0 wahren, so gibt es keinen Zeitpunkt an dem A als 1 und B als 0 oder A als 0 und B als 2 gelesen werden kann.
 Es kann nur A als 0 und B als 0 oder A als 1 und B als 2 gelesen werden.
 
 Damit solche Transaktionen in einer Datenbank effizient koordiniert werden, wird oft auf Lock-Manager wie VLL @vll, der auch in Dragonfly genutzt wird, zurückgegriffen.
-Auf der Suche nach einem angemessenen Lock-Manager ist mir aufgefallen, dass nur wenige für meine gewählte Architektur passend sind und diese oft recht komplizierte Algorithmen nutzen.
+Auf der Suche nach einem angemessenen Lock-Manager ist mir aufgefallen, dass nur wenige für meine gewählte Architektur passend sind und diese oft deutlich mehr Funktionalität mitbringen als ich benötige.
 Daher habe ich mich dazu entschieden, ein eigenes Transaktionsscheme zu entwickeln, welches möglichst gut auf meine Datenbank passt.
 
 Mein Transaktionsschema funktioniert so:
@@ -378,7 +374,17 @@ Mein Transaktionsschema funktioniert so:
   + Die SmallMaps werden nach ihrem Pointerwert in aufsteigender Reihenfolge sortiert.
   + Die Locks der SmallMaps werden in der Reihenfolge nun aufsteigend gesperrt. Es kann passieren, dass eine Falsche SmallMap gesperrt wird, da zwischen Punkt 1 und dem Sperren der SmallMap der Wert, der für die Transaktion erforderlich ist, nach dem in @ch-extend beschrieben Verfahren, nun in einer anderen SmallMap ist, dann wird die falsch gesperrte SmallMap einfach wieder entsperrt und die richtige SmallMap gesucht und in das sortierte Array an die richtige stelle eingefügt. 
 
-Bei Punkt 3 ist anzumerken, dass alle bereits gesperrten Pointer, die einen größeren Wert haben als der neu geladene, wieder entsperrt werden müssen, um Raceconditions zu vermeiden.
+Bei Punkt 3 ist anzumerken, dass alle bereits gesperrten Pointer, die einen größeren Wert haben als der neu geladene, wieder entsperrt werden müssen, um Deadlocks zu vermeiden.
+
+Diese Art vielschrittige Transaktionen zu machen ist sicher vor Deadlocks, da die SmallMaps immer in aufsteigender Reihenfolge gesperrt werden.
+Intuitiv ist das schlüssig und es lässt sich auch durch einen einfachen Beweis durch Widerspruch zeigen, das Deadlocks so vermieden werden:
+  + Nehmen wir an, es gibt ein Deadlock, so muss dieser entstehen, weil ein Thread #1 auf eine SmallMap wartet, die ein anderer Thread #2 gesperrt hat und Thread #2 wartet auf eine SmallMap die Thread #1 gesperrt hat.
+  + Alle SmallMaps die ein Thread sperrt werden in einer aufsteigenden Reihenfolge gesperrt.
+  + Thread #1 wartet auf eine SmallMap $s_1$, die größer ist, als alle bereits gesperrten.
+  + Thread #2 wartet auf eine SmallMap $s_2$, die größer ist, als alle bereits gesperrten.
+  + Thread #1 wartet auf $s_1$, die von Thread #2 gesperrt ist und größer ist als alle bereits gesperrten von Thread #1 aber Thread #2 wartet auf $s_2$, die von Thread #1 gesperrt aber aufgrund der Reihenfolge.
+  + Da Thread #2 $s_1$ gesperrt hat und $s_2$ sperren will muss $s_1 < s_2$, da Thread #1 $s_2$ gesperrt hat und $s_1$ sperren will muss also auch $s_2 < s_1$ gelten.
+  + Daraus folgt: $s_1 < s_2 < s_1$ was ein Widerspruch ist und daher nicht auftreten kann.
 
 == Performance messen und vergleichen <ch-messen>
 
