@@ -126,7 +126,7 @@ Ich habe mich für Zig entschieden, da sie recht sicher und intuitiv ist im Verg
 
 Um einen parallelen Zugriff zu ermöglichen habe ich mich an dem Design von Dash@dash orientiert.
 Auch Dragonfly orientiert sich an diesem Design doch nutzt Dragonfly Dash nicht um parallelen Zugriff zu ermöglichen sondern um einen effizienten Speicher auf einem Kern bereit zu stellen.@df-dash
-Dash ist eine Datenstruktur die auf Extendible-Hashing basiert allerdings für parallelen Zugriff optimiert ist und ins besondere darauf, dass möglichst wenig Speicher geschrieben werden muss.
+Dash ist eine Datenstruktur die auf Extendible-Hashing basiert und für parallelen Zugriff optimiert ist ins besondere darauf, dass möglichst wenig Speicher geschrieben werden muss.
 Da Dash allerdings eine Recht ausführliche Datenstruktur ist habe ich es mir erlaubt diese an mehreren stellen zu vereinfachen.
 
 === Buckets
@@ -175,9 +175,15 @@ In Kombination mit der "Count-Leading-Zeros" Operation von modernen CPUs kann da
 Auf ähnliche Art und Weise können auch freie Indizes gesucht werden und Indizes gefunden werden, die abgelaufen sind.
 Da die Expiry-Daten allerdings 4byte groß sind und das Verarbeiten von allen auf einmal 512bit Vektor Unterstützung bräuchten habe ich mich dazu entschieden, die Expiry Daten in 2 Schritten mit jeweils 8 Einträgen abzuarbeiten, da 256bit Vektoreinheiten deutlich weiter verbreitet sind als 512bit Vektoreinheiten in x64 CPUs.
 
+
+=== SmallMap
+
 18 Buckets werden in eine "SmallMap" zusammengefasst.
 18 Kommt daher, da die SmallMaps damit sehr gut in die Allocator-Page meines Allocators (siehe @ch-alloc) passen. 
 Die SmallMaps werden dann als Baustein genutzt um Dash aufzubauen und damit Extendible-Hashing zu betreiben.
+
+Eine SmallMap dient als kleinste Einheit von Transaktionen in der Datenbank und ist daher mit einem Lock versehen (siehe @ch-queue für die Details des Locks).
+Auf die SmallMap können Leseoperationen mit Optimistic-Concurrency durchgeführt werden und nur für Schreiboperationen muss das Lock tatsächlich gesperrt werden.
 
 === Vergrößern der Datenbank <ch-extend>
 
