@@ -60,8 +60,8 @@ Und diese Aspekte zusammen in einer Datenbank unter zu bringen und mit anderen D
 
 = Zusammenfassung
 
-Viele Datenbanken berufen sich heutzutage auf eine "Shared Nothing Architecture" um ihre Performance Ziele und das Design der Datenbanken zu legitimieren.
-In dieser Arbeit wird das gegenteilige design betrachtet "Share Everything" um zu untersuchen, inwiefern dieses Vergleichbar ist und welche Vor- und Nachteile es mit sich bringt.
+Viele Datenbanken berufen sich heutzutage auf eine "Shared Nothing Architecture" um ihre Performanceziele und das Design der Datenbanken zu legitimieren.
+In dieser Arbeit wird das gegenteilige Design betrachtet "Share Everything" um zu untersuchen, inwiefern dieses Vergleichbar ist und welche Vor- und Nachteile es mit sich bringt.
 Hierfür wird eine Redis kompatible alternative mit diesem Orthogonalem design implementiert und dieses verglichen mit bestehenden Redis kompatiblen Datenbanken. 
 
 Ein weitere Fokus ist auch die Diskussion über eine weite verbreitung dieses Designs und in welchen Anwendungsfällen es in frage kommt.
@@ -69,18 +69,19 @@ Ein weitere Fokus ist auch die Diskussion über eine weite verbreitung dieses De
 = Motivation und Fragestellung
 
 Die Shared Nothing Architektur ist weit verbreitet und kann schon als Status quo der modernen Datenbankentwicklung gesehen werden.
-Interresant in dieser Situation ist allerdings, dass obwohl, oder eventuell gerade weil, viele DBs in diesem Style umgesetzt wurden gibt es nur wenige Auseinandersetzungen mit dieser Idee.
+Interresant in dieser Situation ist allerdings, dass obwohl, oder eventuell gerade weil, viele Datenbanken in diesem Style umgesetzt wurden, es nur wenige Auseinandersetzungen mit dieser Idee gibt.
+Besonders bei Datenbanken die großteile der Arbeit im Arbeitsspeicher verrichten ist es nicht Intuitiv, ob eine Shared Nothing Architektur überlegen wäre.
 
 Um eine Diskussionsgrundlage und eine Referenz zu schaffen ist es notwendig, vergleichbare Werte zu schaffen, anstatt sich auf die Versprechen der Share Nothing Architektur zu verlassen.
 Die Frage die sich hierbei stellt ist: Inwiefern ist eine Share Everything Architektur im vergleich zur Shared Nothing Architektur sinvoll?
 
 = Hintergrund und theoretische Grundlagen
 
-== Cache, Lock und Resource Contention
+== Cache, Locks, und Resource Contention
 
 Das grundlegende Problem bei skalierbaren Datenbanken ist das Problem der "Resource Contention."
-Hierbei geht es hauptsächlich darum, dass es eine geteilte Resource gibt, auf die von mehreren Kernen zugleich zugegriffen werden könnte.
-Bei typischen Programmen sind oft Speicher und Locks die wichtigsten Resourcen die geteilt werden.
+Hierbei geht es hauptsächlich darum, dass es eine geteilte Ressource gibt, auf die von mehreren Kernen zugleich zugegriffen werden könnte.
+Bei typischen Programmen sind oft Speicher und Locks die wichtigsten Ressourcen die geteilt werden.
 Wird auf ähnliche Speicheradressen von unterschiedlichen Kernen zugegriffen so muss der Prozessor diesen Zugriff so koordinieren, dass der Speicher kohärent bleibt was besonders bei Atomic Operationen aufwendig sein kann.
 
 Im allgemeinen kann gesagt werden, dass umso weniger Contention stattfindet, umso effizienter kann ein einzelner Kern arbeiten.
@@ -124,11 +125,13 @@ Der Message Bus könnte genau so auch eine kopierte Liste an "Channels" sein, au
 Grundsätzlich ist es bei einer Shared-Nothing-Architektur so, dass es bestimmte I/O Threads gibt, die Verbindungen von Datenbankclients verwalten und deren Anfragen annehmen.
 Im gegensatz zu den I/O Threads gibt es Datenbankshards, die jeweils ein Teil der Datenbank verwalten.
 Die I/O Threads leiten Anfragen über den Message Bus an die Datenbankshards weiter und diese Shards beantworteten diese Anfrage dann.
+Es ist auch möglich, dass ein Thread sowohl als I/O Thread als auch Datenbankshard agiert.
+Entscheident ist, dass die Daten in einem Shard nicht geteilt werden.
 
 == Share Everything <ch-se>
 
 Gegenüber diesem Share Nothing Design steht das Share Everything Design.
-Das zu lösende Problem ist Ähnlich allerdings die Lösung umgekehrt.
+Das zu lösende Problem ist bleibt gleich, allerdings ist die Lösungsidee umgekehrt.
 Nimmt man an, dass kein Speicher zwischen CPU Kernen geteilt werden soll so muss es eine direkte Kommunikation zwischen den Kernen geben.
 Diese Kommunikation kann über den Concurrency-Primitiven "Channel" gehen.
 Das ist ein effizienter, oft MPSC oder SPSC, Weg um nachrichten zwischen zwei Kernen auzutauschen, die sonnst keine weiteren Daten teilen.
@@ -160,7 +163,7 @@ render(```
 In @abb-se ist dargestellt, wie ich die Share Everything Architektur definiert habe.
 Hierbei gibt es analog zu der Shared Nothing Architektur I/O Threads, die die Datenbankverbindungen und Anfragen verwalten.
 Allerdings ist die Datenbank selber, im Kontrast zu der Shared Nothing Architektur, nicht aufgeteilt, sondern ein einheitliche Datenstruktur, auf die alle I/O Threads Zugriff haben.
-Die I/O Threads selber führen die Queries auf der Datenbank aus und kommunizieren über die geteilte Speicherstruktur ihre Zugriffe so, dass die Datenbank kohärent bleibt. 
+Die I/O Threads selber führen die Queries auf der Datenbank aus und kommunizieren über die geteilte Speicherstruktur ihre Zugriffe so, dass die Datenbank kohärent bleibt.
 
 = Vorgehensweise, Materialien und Methoden
 
@@ -448,14 +451,15 @@ Intuitiv ist das schlüssig und es lässt sich auch durch einen einfachen Beweis
 
 == Performance messen und vergleichen <ch-messen>
 
-Das Messen der Performance hat sich als schwieriger als erwartet herausgestellt.
-Nicht nur ist es der Fall, dass es keinen verbreitetn Test für Transaktionen gibt, sondern auch, dass das oft genutzte Tool "Memtier", dass von Redis eingeführt und entwickelt wurde zum testen von Datenbanken @memtier , sich als weniger Skalierbar als meine implementation der Datenbank heraustellt und daher keine festen Ergebnisse liefern konnte.
+Das Messen der Performance hat sich schwieriger als erwartet herausgestellt.
+Nicht nur ist es der Fall, dass es keinen verbreitetn Test für Transaktionen gibt, sondern auch, dass das oft genutzte Tool "Memtier", das von Redis eingeführt und entwickelt wurde zum testen von Datenbanken @memtier , sich als weniger Skalierbar als meine implementation der Datenbank heraustellt und daher keine festen Ergebnisse liefern konnte.
 
 #figure(image("./assets/round3 memtier.png"), caption: [Ein Test mit Memtier mit problematischen Werten]) <abb-memtier-values>
 
-In @abb-memtier-values ist zu erkennen, wie die Werte, die wie in @ch-ergebnisse erhoben wurden, von "smade Ops/Sec" mit 10 Kernen einbrechen, danach aber wieder größer werden, was im Kontext nicht keinen Sinn ergibt.
+In @abb-memtier-values ist zu erkennen, wie die Werte, die wie in @ch-ergebnisse erhoben wurden, von "smade Ops/Sec" mit 10 Kernen einbrechen, danach aber wieder größer werden, was im Kontext keinen Sinn ergibt.
 Auch das Dragonfly nicht über 12 Kerne Skaliert ist Fragwürdig.
-Zusammen mit vielen Tests habe ich herausgefunden, dass memtier, selbst wenn es die gleiche Menge an Resource zur verfürugng hat, deutlich mehr Leistung benötigt als die Datenbanken.
+Zusammen mit vielen Tests habe ich herausgefunden, dass memtier, selbst wenn es die gleiche Menge an Ressource zur verfügung hat, deutlich mehr Leistung benötigt als die Datenbanken.
+Daher ist es schwierig damit und mit meinen begrenzten Computer-Ressourcen gute Daten zu erheben.
 Um dieses Problem zu umgehen habe ich zusätzlich ein Tool namens "Loader" implementiert, dass die Aufgabe des Messens übernehmen soll.
 
 Aber was wird überhaupt gemessen?
@@ -491,7 +495,7 @@ Ich habe mich für 8 verschiedene Workloads entschieden die ein breites Spektrum
 
 = Ergebnisse <ch-ergebnisse>
 
-Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
+Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu x64 Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
 Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen, Golden Samples, oder Noisy-Neighbours zu vermeiden.
 
 = Ergebnissdiskussion
