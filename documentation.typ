@@ -24,11 +24,12 @@
 
 #align(center)[#info.name]
 
+
 #text(15pt)[
   *Kurzfassung*
 ]
 
-Ziel dieses Projektes ist es die Shared Nothing Architektur, die in vielen Computersystemen genutzt wird, kritisch im gebiet der Datenbanken zu betrachten.
+Ziel dieses Projektes ist es die Shared Nothing Architektur, die in vielen Computersystemen genutzt wird, kritisch im Gebiet der nicht verteilten Datenbanken zu betrachten.
 Hierbei steht besonders die dazu orthognal Share Everything Architektur im Fokus, in der eine alternative Datenbank implementiert wird.
 Diese alternative Datenbank wird mit verbreiteten Datenbanken verglichen um die Anwendbarkeit dieser Architektur zur ermitteln.
 
@@ -37,8 +38,7 @@ Zentrale Aspekte der Arbeit sind dabei:
   - Ein Algorithmus für die Umsetzung von vielschrittigen Transaktionen
   - Das effiziente Bearbeiten von parallelen Operationen über mehrere Kerne
 
-Und diese drei Punkte zusammen in einer Datenbank unter zu bringen und mit anderen Datenbanken vergleichen.  
-
+Und diese Aspekte zusammen in einer Datenbank unter zu bringen und mit anderen Datenbanken vergleichen.  
 
 
 #pagebreak()
@@ -68,10 +68,10 @@ Ein weitere Fokus ist auch die Diskussion über eine weite verbreitung dieses De
 
 = Motivation und Fragestellung
 
-Die Shared Nothing Architektur ist weit verbreitet und kann schon beinahe als Status quo der modernen Datenbankentwicklung gesehen werden.
+Die Shared Nothing Architektur ist weit verbreitet und kann schon als Status quo der modernen Datenbankentwicklung gesehen werden.
 Interresant in dieser Situation ist allerdings, dass obwohl, oder eventuell gerade weil, viele DBs in diesem Style umgesetzt wurden gibt es nur wenige Auseinandersetzungen mit dieser Idee.
 
-Um eine Diskussionsgrundlage zu schaffen und eine Referenz ist es notwendig vergleichbare Werte zu schaffen, anstatt sich auf die Versprechen der Share Nothing Architektur zu verlassen.
+Um eine Diskussionsgrundlage und eine Referenz zu schaffen ist es notwendig, vergleichbare Werte zu schaffen, anstatt sich auf die Versprechen der Share Nothing Architektur zu verlassen.
 Die Frage die sich hierbei stellt ist: Inwiefern ist eine Share Everything Architektur im vergleich zur Shared Nothing Architektur sinvoll?
 
 = Hintergrund und theoretische Grundlagen
@@ -87,30 +87,87 @@ Im allgemeinen kann gesagt werden, dass umso weniger Contention stattfindet, ums
 
 == Shared Nothing
 
-Share Nothing basiert auf der Idee, dass es sehr effizient ist, keine Synchronisation von Daten oder von Zugriffen auf Daten zu benötigen.
+Share Nothing basiert auf der Idee, dass es sehr effizient ist, keine Synchronisation von Daten oder von Zugriffen auf Daten zu benötigen. @the-case-for-shared-nothing
 In dieser Architectur werden nähmlich keine Daten zwischen mehreren Prozessen geteilt was dazu führen soll, dass nicht nur der Programmfluss vereinfacht wird,
 sondern Programme auch effizienter Arbeiten können.
 So muss die CPU, Beispielsweise, weniger Arbeit in Cache-Coherency oder in Atomic Operationen stecken, wenn es keinen geteilten Arbeitsspeicher gibt.
-Auch soll so die Skalierbarkeit von Anwendungen erhöht werden, da die angesprochenen Probleme tendenziell mit höheren Zahlen an CPU Kernen nur größer werden. @the-case-for-shared-nothing
+Auch soll so die Skalierbarkeit von Anwendungen erhöht werden, da die angesprochenen Probleme tendenziell mit höheren Zahlen an CPU Kernen nur größer werden. @cnc-c2clatency
 
-== Share Everything
+#figure(
+render(```
+                   +------------+
++------------------+  Datenbank +-------------------+
+|                  +------------+                   |
+|                                                   |
+| +------+  +------+  +------+  +------+  +------+  |
+| |Shard1|  |Shard2|  |Shard3|  |  ... |  |ShardN|  |
+| +--+---+  +--+---+  +--+---+  +------+  +--+---+  |
+|    |         |         |                   |      |
+|    V         V         V                   V      |
+| +----------------------------------------------+  |
+| |                Message Bus                   |  |
+| +----------------------------------------------+  |
+|    ^         ^         ^                   ^      |
+|    |         |         |                   |      |
+| +--+---+  +--+---+  +--+---+  +------+  +--+---+  |
+| | IO 1 |  | IO 2 |  | IO 3 |  |  ... |  | IO N |  |
+| +------+  +------+  +------+  +------+  +------+  |
+|                                                   |
++---------------------------------------------------+
+```), caption: [Shared Nothing Architektur]
+) <abb-sn>
+
+In @abb-sn ist ein typischer Aufbau so einer Datenbank visualisiert.
+Hierbei ist es wichtig zu beachten, dass der "Message Bus" nicht eine einzige Datenstruktur sein muss, in der Daten beliebig geteilt werden.
+Der Message Bus könnte genau so auch eine kopierte Liste an "Channels" sein, auf die ich in @ch-se noch genauer eingehe.
+
+Grundsätzlich ist es bei einer Shared-Nothing-Architektur so, dass es bestimmte I/O Threads gibt, die Verbindungen von Datenbankclients verwalten und deren Anfragen annehmen.
+Im gegensatz zu den I/O Threads gibt es Datenbankshards, die jeweils ein Teil der Datenbank verwalten.
+Die I/O Threads leiten Anfragen über den Message Bus an die Datenbankshards weiter und diese Shards beantworteten diese Anfrage dann.
+
+== Share Everything <ch-se>
 
 Gegenüber diesem Share Nothing Design steht das Share Everything Design.
 Das zu lösende Problem ist Ähnlich allerdings die Lösung umgekehrt.
-Nimmt man an, dass kein Speicher zwischen CPU Kernen geteilt werden soll so muss es eine direkte Kommunikation zwischen den Kernen geben, wenn nicht geteilte Daten von einem einzelnem Kern benötigt werden.
-Dies kann einen Overhead haben in der Kommunikation.
-Muss CPU Kern A insgesammt 3 Datensätze lesen muss dieser eventuell mit 3 verschiedenen CPU Kernen kommunizieren, was 6 Nachrichten (3x hin und 3x zurück) bedeutet.
-Diese Kommunikation passiert über "Channels".
-Die Informationen von den Channels sind geteilt und können daher ein synchronisations Overhead bedeuten.
+Nimmt man an, dass kein Speicher zwischen CPU Kernen geteilt werden soll so muss es eine direkte Kommunikation zwischen den Kernen geben.
+Diese Kommunikation kann über den Concurrency-Primitiven "Channel" gehen.
+Das ist ein effizienter, oft MPSC oder SPSC, Weg um nachrichten zwischen zwei Kernen auzutauschen, die sonnst keine weiteren Daten teilen.
+
+Dies hat allerdings einen Overhead haben in der Kommunikation.
+Muss CPU Kern A insgesammt 3 Datensätze aus der Datenbank lesen muss dieser eventuell mit 3 verschiedenen CPU Kernen kommunizieren, was 6 Nachrichten (3x hin und 3x zurück) bedeutet.
+Die Speicher der Channels ist geteilt und können daher ein synchronisations Overhead bedeuten.
 Das Share Everything Design zielt darauf ab, diese Kommunikation zu reduzieren und mit günstigen synchronisations Primitiven in den Daten selber die Korrektheit von Transaktionen zu garantieren.
 Hierbei wird eine bedingte Cache und Lock contention beim Zugriff auf die eigentlichen Daten gegen den definitiven Kommunikationsoverhead vom Shared Nothing Design abgewogen.
 
+#figure(
+render(```
+                   +------------+
++------------------+  Datenbank +-------------------+
+|                  +------------+                   |
+| +----------------------------------------------+  |
+| |                Speicherstruktur              |  |
+| +----------------------------------------------+  |
+|    ^         ^         ^                   ^      |
+|    |         |         |                   |      |
+| +--+---+  +--+---+  +--+---+  +------+  +--+---+  |
+| | IO 1 |  | IO 2 |  | IO 3 |  |  ... |  | IO N |  |
+| +------+  +------+  +------+  +------+  +------+  |
+|                                                   |
++---------------------------------------------------+
+```), caption: [Share Everything Architektur]
+) <abb-se>
+
+In @abb-se ist dargestellt, wie ich die Share Everything Architektur definiert habe.
+Hierbei gibt es analog zu der Shared Nothing Architektur I/O Threads, die die Datenbankverbindungen und Anfragen verwalten.
+Allerdings ist die Datenbank selber, im Kontrast zu der Shared Nothing Architektur, nicht aufgeteilt, sondern ein einheitliche Datenstruktur, auf die alle I/O Threads Zugriff haben.
+Die I/O Threads selber führen die Queries auf der Datenbank aus und kommunizieren über die geteilte Speicherstruktur ihre Zugriffe so, dass die Datenbank kohärent bleibt. 
+
 = Vorgehensweise, Materialien und Methoden
 
-Um die Fragen zu beantworten habe ich eine Datenbank implementiert, die in ihrer Funktionalität vergleichbar ist mit den existierenden Datenbanken  Redis @redis gewählt und die Alternativimplementation Dragonfly @df.
+Um die Fragen zu beantworten habe ich eine Datenbank implementiert, die in ihrer Funktionalität vergleichbar ist mit den existierenden Datenbanken Redis @redis gewählt und die Alternativimplementation Dragonfly @df.
 Redis dient hierbei als Vergleich für eine Architektur mit nur einem Kern und Dragonfly für eine Shared-Nothing-Architektur die mit mehreren Kernen skalieren kann.
 
-Bei diesen Datenbanken handelt es sich um Key-Value Datenbanken@redis-kv die sich aufgrund ihrer Einheitlichkeit gut für einen Vergleichen eignen.
+Bei diesen Datenbanken handelt es sich um Key-Value Datenbanken @redis-kv die sich aufgrund ihrer Einheitlichkeit gut für einen Vergleichen eignen.
 Eine Key-Value Datenbank kann vereinfacht als eine Hashmap über das Netzwerk beschrieben werden und ich werde daher Begriffe die mit Hashmaps assoziiert sind in bezug auf die Datenbanken nutzen. 
 
 == Programmiersprache
@@ -118,13 +175,13 @@ Eine Key-Value Datenbank kann vereinfacht als eine Hashmap über das Netzwerk be
 Für die Implementation der Datenbank habe ich verschiedene Programmiersprache in betracht gezogen.
 Da die Datenbank vergleichbar sein muss mit Redis und Dragonfly muss sie in einer vergleichbaren Sprache umgesetzt werden, die nicht zusätzliche Hürden wie einen Garbage Collector oder JIT Compiler einführt.
 
-Die Sprachen die Sinvoll schienen waren C, C++, Rust@rust, und Zig@ziglang.
-Ich habe mich für Zig entschieden, da sie recht simple ist im Vergleich zu C++, generische Typen erlaubt im Gegensatz zu C, und nicht so viele Probleme bereitet wie Rust wenn es darum geht, Daten willkürlich zwischen mehreren Threads zu Teilen.
+Die Sprachen die Sinvoll schienen waren C, C++, Rust @rust, und Zig @ziglang.
+Ich habe mich für Zig entschieden, da sie recht simple ist im Vergleich zu C++, generische Typen erlaubt im Gegensatz zu C, und nicht so viele Probleme bereitet wie Rust wenn es darum geht, Daten (scheinbar) willkürlich zwischen mehreren Threads zu Teilen.
 
 == Dash <ch-dash>
 
-Um einen parallelen Zugriff zu ermöglichen habe ich mich an dem Design von Dash@dash orientiert.
-Auch Dragonfly orientiert sich an diesem Design doch nutzt Dragonfly Dash nicht um parallelen Zugriff zu ermöglichen sondern um einen effizienten Speicher auf einem Kern bereit zu stellen.@df-dash
+Um einen parallelen Zugriff zu ermöglichen habe ich mich an dem Design von Dash @dash orientiert.
+Auch Dragonfly orientiert sich an diesem Design doch nutzt Dragonfly Dash nicht um parallelen Zugriff zu ermöglichen sondern um einen effizienten Speicher auf einem Kern bereit zu stellen. @df-dash
 Dash ist eine Datenstruktur die auf Extendible-Hashing basiert und für parallelen Zugriff optimiert ist ins besondere darauf, dass möglichst wenig Speicher geschrieben werden muss.
 Da Dash allerdings eine Recht ausführliche Datenstruktur ist habe ich es mir erlaubt diese an mehreren stellen zu vereinfachen.
 
@@ -182,6 +239,9 @@ Die SmallMaps werden dann als Baustein genutzt um Dash aufzubauen und damit Exte
 
 Eine SmallMap dient als kleinste Einheit von Transaktionen in der Datenbank und ist daher mit einem Lock versehen (siehe @ch-queue für die Details des Locks).
 Auf die SmallMap können Leseoperationen mit Optimistic-Concurrency durchgeführt werden und nur für Schreiboperationen muss das Lock tatsächlich gesperrt werden.
+
+Ist eine SmallMap voll und es wird versucht weitere Einträge hinzuzufügen wird erst geprüft, ob Abgelaufene Einträge, erkennbar an den Expiry-Daten, entfernt werden können.
+Ist das nicht fall so wird eine neue SmallMap reserviert, und etwa die Hälfte aller Einträge in die neue SmallMap übertragen und die neue SmallMap wird zu der Datenbank hinzugefügt.
 
 === Vergrößern der Datenbank <ch-extend>
 
@@ -278,7 +338,7 @@ Das kann eine (Linked-)Liste sein, die nur 2 der 8 byte Felder braucht, um den H
 
 == Memory-Management <ch-alloc>
 
-Für das Memory Management habe ich als Grundlage eine vereinfachte Version von Microsofts mimalloc@mimalloc implementiert.
+Für das Memory Management habe ich als Grundlage eine vereinfachte Version von Microsofts mimalloc @mimalloc implementiert.
 Das ist notwendig nicht nur aus dem Grund, dass Zig noch keinen starken und allgemeinen Allocator bereitstellt, sondern auch daher, dass ich aufgrund der Share Everything Architektur besondere Anforderungen an mein Memory-Management habe.
 
 In der Share Everything Architektur stellt sich nämlich im Gegensatz zur Shared Nothing Architektur die Frage, wann es sicher ist, Speicher wieder an das Betriebssystem zurück zu geben.
@@ -290,7 +350,7 @@ Wenn ein schreibender Thread entscheidet, Speicher freizugeben, wird dieser nur 
 
 == Concurrency und I/O
 
-Meine umsetzung der Datenbank orientiert sich an modernen Concurrency und I/O modellen und nutzt für Concurrency State-Machines und für I/O die asynchrone API io_uring@io-uring.
+Meine umsetzung der Datenbank orientiert sich an modernen Concurrency und I/O modellen und nutzt für Concurrency State-Machines und für I/O die asynchrone API io_uring @io-uring.
 Da ich meine Datenbank in der Programmiersprache Zig implemtiere und diese zu diesen Zeitpunkt noch keine fertige untertützung für async/await hatte habe ich mich dazu entschieden, Concurrency mit der Hilfe von State-Machines zu implementieren.
 Diese State-Machines werden in einem Event-Loop pro Thread immer wieder aufgerufen und können so schrittweise Fortschritt erreichen, ohne den Thread durchgängig zu blockieren.
 So kann eine State-Machine die Versucht ein Lock zu Sperren speichern, dass die State-Machine an diesem Punkt weiter machen muss und die Kontrolle zurück an den Event-Loop geben, der die State-Machine zu einem späteren Zeitpunkt wieder Aufruft.
@@ -378,18 +438,24 @@ Bei Punkt 3 ist anzumerken, dass alle bereits gesperrten Pointer, die einen grö
 
 Diese Art vielschrittige Transaktionen zu machen ist sicher vor Deadlocks, da die SmallMaps immer in aufsteigender Reihenfolge gesperrt werden.
 Intuitiv ist das schlüssig und es lässt sich auch durch einen einfachen Beweis durch Widerspruch zeigen, das Deadlocks so vermieden werden:
-  + Nehmen wir an, es gibt ein Deadlock, so muss dieser entstehen, weil ein Thread #1 auf eine SmallMap wartet, die ein anderer Thread #2 gesperrt hat und Thread #2 wartet auf eine SmallMap die Thread #1 gesperrt hat.
+  + Nehmen wir an, es gibt ein Deadlock, so muss dieser entstehen, weil ein Thread \#1 auf eine SmallMap wartet, die ein anderer Thread \#2 gesperrt hat und Thread \#2 wartet auf eine SmallMap die Thread \#1 gesperrt hat.
   + Alle SmallMaps die ein Thread sperrt werden in einer aufsteigenden Reihenfolge gesperrt.
-  + Thread #1 wartet auf eine SmallMap $s_1$, die größer ist, als alle bereits gesperrten.
-  + Thread #2 wartet auf eine SmallMap $s_2$, die größer ist, als alle bereits gesperrten.
-  + Thread #1 wartet auf $s_1$, die von Thread #2 gesperrt ist und größer ist als alle bereits gesperrten von Thread #1 aber Thread #2 wartet auf $s_2$, die von Thread #1 gesperrt aber aufgrund der Reihenfolge.
-  + Da Thread #2 $s_1$ gesperrt hat und $s_2$ sperren will muss $s_1 < s_2$, da Thread #1 $s_2$ gesperrt hat und $s_1$ sperren will muss also auch $s_2 < s_1$ gelten.
+  + Thread \#1 wartet auf eine SmallMap $s_1$, die größer ist, als alle bereits gesperrten.
+  + Thread \#2 wartet auf eine SmallMap $s_2$, die größer ist, als alle bereits gesperrten.
+  + Thread \#1 wartet auf $s_1$, die von Thread \#2 gesperrt ist und größer ist als alle bereits gesperrten von Thread \#1 aber Thread \#2 wartet auf $s_2$, die von Thread \#1 gesperrt ist.
+  + Da Thread \#2 $s_1$ gesperrt hat und $s_2$ sperren will muss $s_1 < s_2$, da Thread \#1 $s_2$ gesperrt hat und $s_1$ sperren will muss also auch $s_2 < s_1$ gelten.
   + Daraus folgt: $s_1 < s_2 < s_1$ was ein Widerspruch ist und daher nicht auftreten kann.
 
 == Performance messen und vergleichen <ch-messen>
 
 Das Messen der Performance hat sich als schwieriger als erwartet herausgestellt.
-Nicht nur ist es der Fall, dass es keinen verbreitetn Test für Transaktionen gibt, sondern auch, dass das oft genutzte Tool "Memtier", dass von Redis eingeführt und entwickelt wurde zum testen von Datenbanken@memtier , sich als weniger Skalierbar als meine implementation der Datenbank heraustellt und daher keine festen Ergebnisse liefern konnte.
+Nicht nur ist es der Fall, dass es keinen verbreitetn Test für Transaktionen gibt, sondern auch, dass das oft genutzte Tool "Memtier", dass von Redis eingeführt und entwickelt wurde zum testen von Datenbanken @memtier , sich als weniger Skalierbar als meine implementation der Datenbank heraustellt und daher keine festen Ergebnisse liefern konnte.
+
+#figure(image("./assets/round3 memtier.png"), caption: [Ein Test mit Memtier mit problematischen Werten]) <abb-memtier-values>
+
+In @abb-memtier-values ist zu erkennen, wie die Werte, die wie in @ch-ergebnisse erhoben wurden, von "smade Ops/Sec" mit 10 Kernen einbrechen, danach aber wieder größer werden, was im Kontext nicht keinen Sinn ergibt.
+Auch das Dragonfly nicht über 12 Kerne Skaliert ist Fragwürdig.
+Zusammen mit vielen Tests habe ich herausgefunden, dass memtier, selbst wenn es die gleiche Menge an Resource zur verfürugng hat, deutlich mehr Leistung benötigt als die Datenbanken.
 Um dieses Problem zu umgehen habe ich zusätzlich ein Tool namens "Loader" implementiert, dass die Aufgabe des Messens übernehmen soll.
 
 Aber was wird überhaupt gemessen?
@@ -411,7 +477,7 @@ Als erster wird ein Threadpool gestartet und jeder Thread verbindet sich mit ein
 Sobald eine Verbindungen verbunden ist startet diese Anfragen an die Datenbank zu schicken mit einem festgelegten Format.
 Das passiert so lange, bis jede Verbindung Anfragen schickt und dann geht das Messen los, wobei 20 Sekunden lang gemessen wird.
 Für jede Anfrage wird die Latenz gemessen und gespeichert.
-Die Durchsatzleistung ergiebt sich nach den 20 Sekunden aus den gesammt gemessenen Anfragen geteilt durch 20 Sekunden.
+Die Durchsatzleistung ergibt sich nach den 20 Sekunden aus den gesammt gemessenen Anfragen geteilt durch 20 Sekunden.
 Die Latenz-Metriken (Durchschnitt, p50 etc. etc.) ergeben sich aus der Agregation von den gespeicherten Latenzen.
 
 Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen durchgeführt woraus die Skalierbarkeit abgelitten werden kann.
@@ -423,7 +489,7 @@ Ich habe mich für 8 verschiedene Workloads entschieden die ein breites Spektrum
   + 10% Read, 90% Write. Dieses Workload ist eher untypisch aber relevant um zu erkennen, ob lese Operationen möglicherweise von Schreiboperationen verdrängt werden. Dieses workload wird auch sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet.
   + 8 writes in einer Transaktion. Dieses Workload überprüft die Performance bei vielen langlaufenden Transaktionen.
 
-= Ergebnisse
+= Ergebnisse <ch-ergebnisse>
 
 Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
 Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen, Golden Samples, oder Noisy-Neighbours zu vermeiden.
@@ -437,6 +503,6 @@ Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der s
 
 #pagebreak()
 
-#bibliography("biblio.yaml")
+#bibliography("biblio.yaml", style: "deutsche-sprache")
 
 #set page(columns: 1)

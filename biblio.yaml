@@ -1,8 +1,9 @@
 scylla-sn:
   type: Web
   title: What is Shared Nothing Architecture? Definition & FAQs | Scylla
-  author: ScyllaDB
+  author: Meghan Jordan
   url: https://www.scylladb.com/glossary/shared-nothing-architecture/
+  date: 2023-01-17
 df:
   type: Web
   title: Dragonfly - The Fastest In-Memory Data Store
@@ -13,11 +14,13 @@ df-sn:
   title: dragonfly/docs/df-share-nothing.md at main · dragonflydb/dragonfly · GitHub
   author: Dragonfly
   url: https://github.com/dragonflydb/dragonfly/blob/main/docs/df-share-nothing.md
+  date: 2023-10
 df-dash:
   type: Web
   title: dragonfly/docs/dashtable.md at main · dragonflydb/dragonfly · GitHub
   author: Dragonfly
   url: https://github.com/dragonflydb/dragonfly/blob/main/docs/dashtable.md
+  date: 2023-10
 dash:
   type: Web
   title: "Dash: scalable hashing on persistent memory"
@@ -41,6 +44,7 @@ redis-kv:
   author: Redis
   title: What is a Key-Value Database? | Redis
   url: https://redis.com/nosql/key-value-databases/
+  date: 2023-06-07
 memtier:
   type: Web
   title: "memtier_benchmark: A High-Throughput Benchmarking Tool for Redis & Memcached"
@@ -56,10 +60,12 @@ ziglang:
   type: Web
   title: Home ⚡ Zig Programming Language
   url: https://ziglang.org/
+  author: Zig
 rust:
   type: Web
   title: Rust Programming Language
   url: https://www.rust-lang.org/
+  author: Rust
 mimalloc:
   type: Web
   title: "Mimalloc: Free List Sharding in Action"
@@ -71,3 +77,12 @@ vll:
   title: "Lightweight Locking for Main Memory Database Systems"
   author: ["Kun Ren", "Alexander Thomson", "Daniel J. Abadi"]
   url: https://www.cs.umd.edu/~abadi/papers/vll-vldb13.pdf
+  doi: "10.14778/2535568.2448947"
+  date: 2012-12-01
+cnc-c2clatency:
+  type: Web
+  title: " Core to core latency data on large systems."
+  author: Clamchowder
+  publisher: Chips and Chese
+  date: 2023-10-07
+  url: https://chipsandcheese.com/2023/11/07/core-to-core-latency-data-on-large-systems/
