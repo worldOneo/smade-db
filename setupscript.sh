@@ -13,14 +13,5 @@ cd smade-db
 
 service dragonfly stop
 
-snap install go --classic
-cd atillery
-go build -tags=smade
-mv ./atillery ../smade-atillery
-go build -tags=dragon
-mv ./atillery ../dragon-atillery
-cd ..
-cd ..
-
 chown -R ubuntu:ubuntu ./smade-db
 apt install redis-server -y
