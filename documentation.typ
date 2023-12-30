@@ -500,8 +500,6 @@ Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der s
 Zudem wurde jeder Test einmal durchgeführt wenn die Datenbank festgelegte Threads hatte und einmal ohne.
 Das heißt "affinity" und ist in den Ergebnissen mit "aff" oder "pinned" gekenzeichnet.
 
-== Messwerte
-
 Werfen wir zuerst einen Blick auf die Workloads, die keine Pipeline nutzen.
 #figure(image("./assets/GET-SET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 90% Get, 10% Set, pipeline=1, gaussian key distribution]) <abb-throughput-gsp1g>
 
@@ -557,8 +555,34 @@ Auch in der Latenz in @abb-latency-m wird ein Performanceeinbruch sichtbar.
 
 Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Transaktionen und die Latenz von Redis sinkt aber die Latenz von Dragonfly übertifft die von Redis bei den hohen Perzentilen und ist auch im Durchschnitt höher. 
 
-
 = Ergebnissdiskussion
+
+Nach den betrachten der Ergebnisse scheint es so, als wäre eine Share Everything Architektur in bestimmten Anwendungsfällen Alternativen überlegen.
+Der Fokus dieser Arbeit liegt auf der Einordnung der Share Everything Architektur und die Frage ist, wie anwendbar diese in anderen Fällen ist.
+
+== Anwendbarkeit
+
+Die Ergebnisse zeigen, dass eine Share Everything Architektur einer Shared Nothing Architektur gegenüber viele Vorteile haben kann, doch haben sich auch bei meiner Arbeit viele Probleme mit dieser Architektur aufgezeigt.
+Das signifikanteste ist, dass es für viele Datenstrukturen keine einfache Share Everything alternative gibt.
+Das gilt für viele Index-Strukturen, für die es oft viel Aufwand in Shared Nothing Architekturen bedarf diese zu integrieren, dass es umso schwerer ist so eine Struktur effizient für Share Nothing umzusetzen.
+Diese Ergebnisse sind also nur in einem sehr begrenzten Rahmen zu betrachten und sollten nicht weit über die in dieser Arbeit vorgestellte Datenbank ohne weitere Nachforschungen extrapoliert werden.
+
+== Qualität der Ergebnisse
+
+Auch wenn ich mir meiner Messmethodik recht sicher bin, ist der Umfang dieser Arbeit kaum genug um die vielen Faceten der Performance zu erfassen.
+Während Beispielsweise die Ergebnisse wie ich sie hier gezeigt habe in mehreren durchläufen relativ wiederholbar waren, wurden alle nur in einem sehr Spezifischen szenario erhoben.
+So stellt sich die Frage, ob die Ergebnisse zur gleichen Aussage kämen, wenn sie auf AMD Hardware oder ARM IP getestet werden würde oder wie sich die Datenbank verhält, wenn die Anzahl an Datenbankclients verändert wird. 
+
+Auch gibt es in der Datenbank noch einige Probleme die noch nicht vollständig behoben oder durchdrungen wurden, wie die angesprochene Latenzspitze oder einige Probleme der Speicherverwaltung wie, dass in bestimmten Szenarien scheinbar immernoch Speicher nicht recycelt wird.
+Hierbei stellt sich die Frage, ob und zu welchen Maß diese Probleme die Performance der Architektur beinflussen.
+
+Um noch sicherere Ergebnisse zu erhalten bedarf es noch mehr Messung, auch wenn für diese Arbeit mehr als 10 Tausend Datenpunkte erhoben und betrachtet wurden, und die Datenbank sollte in einen Zustand gebracht werden, in dem sie als Production-Ready bezeichnet werden kann.
+
+== Mehrwert dieser Arbeit
+
+Es ist nicht so lange her, dass "Performance Engineering" daraus bestand, die Hardware auf dem neusten stand zu halten.
+Heutzutage wird es allerdings immer schwerer, sich auf ständige verbesserung der Leistung von Prozessoren zu verlassen um den steigenden Leistungsforderungen der digitalisierten Welt gerecht zu werden.
+Die in dieser Arbeit vorgeschlagene Architektur für Hauptspeicherdatenbanken bietet möglicherweise einen Ansatz für das Entwickeln von effizienteren Systemen.
 
 = Fazit und Ausblick
 
