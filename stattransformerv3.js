@@ -143,11 +143,18 @@ set key left top
 set grid xtics ytics mytics
 set mytics 10  
 
-set style line 1 lc rgb 'light-blue' lw 2
-set style line 2 lc rgb 'blue' lw 2
-set style line 3 lc rgb 'red' lw 2
-set style line 4 lc rgb 'light-green' lw 2
-set style line 5 lc rgb 'dark-green' lw 2
+set style line 1 lc rgb 'light-blue' lw 5
+set style line 2 lc rgb 'blue' lw 5
+set style line 3 lc rgb 'red' lw 5
+set style line 4 lc rgb 'light-green' lw 5
+set style line 5 lc rgb 'dark-green' lw 5
+
+set xtics font "Verdana,18" rotate by -45
+set ytics font "Verdana,18"
+set rmargin at screen 0.90
+set bmargin at screen 0.13
+
+set key font "Verdana,20"
 `);
 
 for (let i = 0; i < benchmarks.length; i++) {
@@ -176,10 +183,16 @@ for (let i = 0; i < benchmarks.length; i++) {
   console.error(`
 set output '${benchmarks[i].replace("/", "-")} Throughput.png'
 plot \\
-   "data.csv" using 1:${2 + o} with lp ls 1 pt 1 title "Dragonfly", \\
-   "data.csv" using 1:${22 + o} with lp ls 2 pt 2 title "Dragonfly aff", \\
-   "data.csv" using 1:${42 + o} with lp ls 3 pt 5 title "Redis", \\
-   "data.csv" using 1:${62 + o} with lp ls 4 pt 9 title "Smade aff", \\
-   "data.csv" using 1:${82 + o} with lp ls 5 pt 11 title "Smade", 
+   "data.csv" using ${
+     2 + o
+   }:xticlabels(1) with lp ls 1 pt 1 title "Dragonfly", \\
+   "data.csv" using ${
+     22 + o
+   }:xticlabels(1) with lp ls 2 pt 2 title "Dragonfly aff", \\
+   "data.csv" using ${42 + o}:xticlabels(1) with lp ls 3 pt 5 title "Redis", \\
+   "data.csv" using ${
+     62 + o
+   }:xticlabels(1) with lp ls 4 pt 9 title "Smade aff", \\
+   "data.csv" using ${82 + o}:xticlabels(1) with lp ls 5 pt 11 title "Smade", 
 `);
 }

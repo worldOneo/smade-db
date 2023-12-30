@@ -13,5 +13,6 @@ cd smade-db
 
 service dragonfly stop
 
-chown -R ubuntu:ubuntu ./smade-db
+cd ..
+chown -R ubuntu:ubuntu .
 apt install redis-server -y

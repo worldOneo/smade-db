@@ -488,7 +488,7 @@ Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen dur
 
 Außerdem müssen mehrere Workloads getestet werden, um verschiedene Scenarien zu simulieren.
 Ich habe mich für 8 verschiedene Workloads entschieden die ein breites Spektrum an Fällen simulieren sollen:
-  + 8 Pipelined inserts. Das ist ein writeonly Test, der passieren kann, wenn z.B. eine Datenbank von einer anderen Quelle befüllt wird.
+  + 8 Pipelined inserts (pipelined bedeutet, dass sie alle gleichzeitig geschickt werden ohne auf einzelne Antworten zu warten). Das ist ein writeonly Test, der passieren kann, wenn z.B. eine Datenbank von einer anderen Quelle befüllt wird.
   + 90% Read, 10% Write. Das ist ein Workload was sehr Typisch ist, da typischer weise deutlich mehr Daten abgerufen werden als sie geschrieben werden. Dieses Workload wird sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet (um hotspots zu simulieren) und in beiden Fällen mit einer Pipeline von 1 und 8 getestet.
   + 10% Read, 90% Write. Dieses Workload ist eher untypisch aber relevant um zu erkennen, ob lese Operationen möglicherweise von Schreiboperationen verdrängt werden. Dieses workload wird auch sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet.
   + 8 writes in einer Transaktion. Dieses Workload überprüft die Performance bei vielen langlaufenden Transaktionen.
@@ -497,6 +497,66 @@ Ich habe mich für 8 verschiedene Workloads entschieden die ein breites Spektrum
 
 Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu x64 Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
 Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen, Golden Samples, oder Noisy-Neighbours zu vermeiden.
+Zudem wurde jeder Test einmal durchgeführt wenn die Datenbank festgelegte Threads hatte und einmal ohne.
+Das heißt "affinity" und ist in den Ergebnissen mit "aff" oder "pinned" gekenzeichnet.
+
+== Messwerte
+
+Werfen wir zuerst einen Blick auf die Workloads, die keine Pipeline nutzen.
+#figure(image("./assets/GET-SET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 90% Get, 10% Set, pipeline=1, gaussian key distribution]) <abb-throughput-gsp1g>
+
+Alle Graphen werden in die Darstellung wie in @abb-throughput-gsp1g haben.
+In den Graphen ist meine Datenbank als "Smade" bezeichnet.
+Für die Durchsatzleistung sind auf der x-Achse die getesteten Kerne dargestellt und auf der y-Achse die gemessene Performance in Ops/Sec. 
+Hier ist also zu erkennen, dass die Affinity wenig einfluss auf die Durchsatzleistung der Datenbanken hat und das die Performance bei nur einem einzelnen Kern nahezu Identisch ist, unabhängig vom Design.
+
+#figure(image("./assets/GET-SET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 90% Get, 10% Set, pipeline=1, gaussian Schlüsselverteilung]) <abb-latency-gsp1g>
+
+In @abb-latency-gsp1g ist die Latenz der Datenbanken visualisiert mit 16 Kernen (bzw. 1 Kern im Fall von Redis, da Redis keine Konfiguration für mehrere Kerne erlaubt).
+Wichtig ist hierbei die logarithmische Skalierung der y-Achse zu beachten.
+Zu erkennen ist, dass die Performance von Dragonfly und Smade recht nahe bei einander liegt, die Versionen mit Affinity aber gegen die Intuition eine etwas höhere Latenz haben.
+
+Gleiche Ergebnisse, mit relativ ähnlichen Erbgenissen gibt es auch für die Schreib dominierten Workloads.
+Entgegen der Intuition ist die Durchsatzleitung (@abb-throughput-sgp1g) und Latenz (@abb-latency-sgp1g) nicht bedeutend anders.
+
+#figure(image("./assets/SET-GET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 10% Get, 90% Set, pipeline=1, gaussian Schlüsselverteilung]) <abb-throughput-sgp1g>
+#figure(image("./assets/SET-GET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 10% Get, 90% Set, pipeline=1, gaussian Schlüsselverteilung]) <abb-latency-sgp1g>
+
+Auf den ersten Blick mag es so scheinen, als wäre "Smade" mit der Share Everything Architektur am schnellsten.
+Es stellt sich jedoch die Frage, ob das Tatsächlich an der Architektur liegt, oder villeicht an anderen Faktoren, wie die Implementation des I/Os.
+Um diese Frage zu beantworten lohnt es sich die pipelined und transaktionalen Workloads zu betrachten.
+Hierbei werden gleichbleibende Lasten, wie z.B. I/O weniger repräsentiert als in den Workloads mit nur einer einzigen Anfrage.
+Wenn der Abstand zwischen Dragonfly und Smade schrumpft ist das ein guter Indikator dafür, dass dieser Unterschied nur an dingen wie I/O liegt.
+
+#figure(image("./assets/SET Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 100% Set, pipeline=8, zufällige Schlüsselverteilung]) <abb-throughput-sgp8g>
+#figure(image("./assets/SET Latency.png"), caption: [Latenz $mu$s vs Perzentil: 100% Set, pipeline=8, zufällige Schlüsselverteilung]) <abb-latency-sgp8g>
+
+Wie in @abb-throughput-sgp8g zu erkennen ist, ist die Performance von Redis und Smade bei einem Kern wieder nahezu identisch.
+Im Kontrast dazu ist die Performance von Dragonfly mit einem Kern geringer als die von Redis und erst mit 2 Kernen holt Dragonfly dieses Defizit auf.
+Die Performancedifferenz zwischen Dragonfly und Smade wächst über die Kerne immer weiter.
+Während es bei einem Kern nur etwa 40% sind so beträgt diese bei 8 und mehr Kernen mehr als 100%.
+Es scheint also so, als würde Dragonfly hier deutlich weniger Skalieren, als im test mit nur einer Anfrage zur Zeit.
+Interesant ist hierbei die Latenzspitze im p99.999, die nicht bei 14 oder weniger Kernen existiert oder ohne Affinity, von Smade in @abb-latency-sgp8g anzuschauen.
+Während ich diese noch nicht eindeutig klären konnte scheint es so, als läge es an der Art und Weise wie ganz genau die Anfragen bearbeitet werden zusammen mit Unregelmäßigkeiten im System.
+
+Ein ähnliches aber noch extremeres Ergebniss ergibt sich bei den Transaktionen.
+Ich habe ja die Hypothese aufgestellt, dass Transaktionen besonders viel Overhead mit der Kommunikation in einer Shared Nothing Architektur haben und die Daten sind ein Indiz dafür.
+
+#figure(image("./assets/MULTI SET 5 R Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: Transaktion mit 5x Set, zufällige Schlüsselverteilung]) <abb-throughput-m>
+
+In @abb-throughput-m ist zu erkennen, wie die Durchsatzleistung von Dragonfly nun deutlich hinter der von Redis bei einem Kern liegt, während Smade bei einem Kern ein kleines Bisschen vor Redis liegt.
+Dieser Datensatz ist in Kombination mit mit dem aus @abb-throughput-sgp8g extrem bedeutsam, denn vom äußeren Aufbau sind sie sehr sehr Ähnlich.
+Die Transaktion is Pipelined so auch die 8 Pipelined set commands.
+Auch vom I/O sind sie sehr ähnlich.
+Die Transaktion hat zwar nur 5 Set Anfragen in ihr drinne allerdings kommt eine Transaktion mit etwas mehr I/O Aufwand.
+Also  existiert in beiden Workloads etwa die gleiche Arbeit mit dem einzigen Unterschied, dass die Transaktion atomar passieren muss.
+Dieser Unterschied erhöht die Performancedifferenz von den 100% auf mehr als 450% zwischen den beiden Datenbanken.
+Auch in der Latenz in @abb-latency-m wird ein Performanceeinbruch sichtbar.
+
+#figure(image("./assets/MULTI SET 5 R Latency.png"), caption: [Latenz $mu$s vs Perzentil: Transaktion mit 5x Set, zufällige Schlüsselverteilung]) <abb-latency-m>
+
+Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Transaktionen und die Latenz von Redis sinkt aber die Latenz von Dragonfly übertifft die von Redis bei den hohen Perzentilen und ist auch im Durchschnitt höher. 
+
 
 = Ergebnissdiskussion
 
