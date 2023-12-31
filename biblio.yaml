@@ -39,6 +39,11 @@ redis:
   title: Redis | The Real-time Data Platform
   author: Redis
   url: https://redis.com/
+redis-transactions:
+  type: Web
+  title: Transactions
+  author: Redis
+  url: https://redis.io/docs/interact/transactions/
 redis-kv:
   type: Web
   author: Redis
