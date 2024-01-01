@@ -14,14 +14,24 @@
 
 #set quote(block: true)
 #set heading(numbering: "1.1")
-#set par(leading: 1.5em)
-
 
 #linebreak()
 
 #align(center, text(17pt)[
   *#title*
 ])
+
+#set par(leading: 1.5em)
+#set block(spacing: 2em)
+#show heading: it => [
+  #set par(leading: 0.65em)
+  #block(it, below: 1em)
+]
+#show figure: it => [
+  #set par(leading: 0.65em)
+  #it
+]
+#let bll = false
 
 #align(center)[#info.name]
 
@@ -117,8 +127,6 @@ render(```
 ```), caption: [Shared Nothing Architektur]
 ) <abb-sn>
 
-#linebreak()
-
 In @abb-sn ist ein typischer Aufbau so einer Datenbank visualisiert.
 Hierbei ist es wichtig zu beachten, dass der "Message Bus" nicht eine einzige Datenstruktur sein muss, in der Daten beliebig geteilt werden.
 Der Message Bus könnte genau so auch eine kopierte Liste an "Channels" sein, auf die ich in @ch-se noch genauer eingehe.
@@ -160,8 +168,6 @@ render(```
 +---------------------------------------------------+
 ```), caption: [Share Everything Architektur]
 ) <abb-se>
-
-#linebreak()
 
 In @abb-se ist dargestellt, wie ich die Share Everything Architektur definiert habe.
 Hierbei gibt es analog zu der Shared Nothing Architektur I/O Threads, die die Datenbankverbindungen und Anfragen verwalten.
@@ -299,8 +305,6 @@ SmallMaps:  |_| |_|
 ```), caption: [Directory vor der Vergrößerung]
 ) <abb-dict-extension1>
 
-#linebreak()
-
 Wenn die SmallMap 2 zu klein ist, um Daten zu Speichern, wird das Directory erst erweitert wie in @abb-dict-extension2.
 Hierbei werden die Pointer des Directories auf die bereits existierenden SmallMaps gesetzt.
 
@@ -321,8 +325,6 @@ SmallMaps:  |_| |_|
              1   2
 ```), caption: [Directory nach der Vergrößerung]
 ) <abb-dict-extension2>
-
-#linebreak()
 
 Danach wird etwa die Hälfte der Einträge aus SmallMap 2 in eine neue SmallMap verschoben.
 In @abb-dict-extension3 wird veranschaulicht, wie die neue SmallMap hinzugefügt wird und somit die Kapazität erhöht wird.
@@ -352,6 +354,8 @@ Die Flag gibt an, dass die Datenbank aktuell vergrößert wird.
 
 /**/
 
+#if bll [
+
 == Darstellung von Datenbank-Werten
 
 Alle Werte, die in der Datenbank gespeichert werden haben das Format, welches in @layout-dbvalue dargestellt wird und insgesammt 24byte groß ist.
@@ -367,8 +371,6 @@ Alle Werte, die in der Datenbank gespeichert werden haben das Format, welches in
   ], caption: "Datenbank-Werte", supplement: "Layout"
 ) <layout-dbvalue>
 
-#linebreak()
-
 Hierbei handelt es sich um einen Union-Type, der 3x8byte groß ist, wobei die letzten beiden Bits genutzt werden, um die Typen der Union zu unterscheiden.
 Das geht, weil alle Daten von Strings in der Datenbank 8byte alligned sind und daher die letzten beiden Bits eines gültigen Pointers immer 0 sind.
 Sind die letzten beiden Bits 0, so handelt es sich also um einen String.
@@ -378,6 +380,7 @@ Sind die letzten beiden Bits 1, so sind andere Datentypen beschrieben.
 Das kann eine (Linked-)Liste sein, die nur 2 der 8byte-Felder braucht, um den Head der Liste sowie ihre Länge zu speichern oder auch viele andere Datentypen.
 
 /**/
+]
 
 == Memory-Management <ch-alloc>
 
@@ -402,29 +405,29 @@ Nach dem Speichern kann die State-Machine die Kontrolle zurück an den Event-Loo
 
 == Queue Lock <ch-queue>
 
-Um die Latenz der Datenbank vorhersehbar zu gestallten ist es wichtig, dass keine Operation theoretisch unendlich lang dauer kann.
-Da Locks aber teilweise Notwendig sind um eine effiziente Arbeitsweise zu ermöglichen habe ich das Queue-Lock entwickelt was dazu dient,
-dass alle Schreiboperation in der selben Reihenfolge passieren in der sie das erste mal Probiert wurden.
-Das soll verhindern, dass wenn es eine Operation auf der Datenbank gibt, die immer wieder versucht das Lock für Schreiboperationen zu Sperren, dass diese nicht von immer neuen Operationen geblockt werden kann.
+Um die Latenz der Datenbank vorhersehbar zu gestalten, ist es wichtig, dass keine Operation theoretisch unendlich lang dauern kann.
+Da Locks aber teilweise notwendig sind, um eine effiziente Arbeitsweise zu ermöglichen, habe ich das Queue-Lock entwickelt, was dazu dient,
+dass alle Schreiboperationen in derselben Reihenfolge passieren, in der sie das erste Mal probiert werden.
+Das soll verhindern, dass, wenn eine Operation immer wieder versucht, das Lock für Schreiboperationen zu sperren, diese nicht von immer neuen Operationen geblockt werden kann.
 So könnte es sein, dass es einen Thread gibt, der es immer wieder schafft das Lock für sich zu sperren und damit immer einen anderen Thread aussperrt.
 
-Daher habe ich ein Locking mechanismus entworfen, der dieses Problem umgehen soll: das "Queue-Lock".
-Bei dem Queue-Lock gibt es die garantierte Reihenfolge, was in @algo-queue-lock /* und @algo-queue-trylock */ beschrieben wird.
-Hierbei wird ein 64bit Intger als lock genutzt wie zwei 32bit Integern ($l 32 eq.est $ Low 32 bits und $h 32 eq.est $ High 32 bits).
+Daher habe ich einen Locking-Mechanismus entworfen, der dieses Problem umgehen soll: das "Queue-Lock".
+Bei dem Queue-Lock gibt es die garantierte Reihenfolge, was in @algo-queue-lock und @algo-queue-trylock beschrieben wird.
+Hierbei wird ein 64bit Integer als Lock genutzt.
+Dieser 64bit Integer wird allerdings als zwei 32bit Integer ($l 32 eq.est $ low 32bits und $h 32 eq.est $ high 32bits) betrachtet.
 Das Queue-Lock kann als Warteschlange betrachtet werden, daher auch der Name.
-In den high 32 bits wird gespeichert, wie viele noch vor einem in der Schlange stehen und in den low 32 bits wird gespeichert, der wie vielte gerade drann ist.
-Wenn sich ein Thread in die Schlange einreiht (die high 32 bits erhöhen um 1) gibt es zwei Möglichkeiten: Entweder ein anderer Thread ist vor dem eigenen Thread, oder nicht.
-Hierbei gilt auch als "vor dem eigenen Thread", wenn ein Thread gerade an der Reihe ist.
+In den high 32bits wird gespeichert, wie viele Threads noch in der Schlange stehen und in den low 32bits wird gespeichert, der wievielte Thread gerade dran ist.
+Wenn sich ein Thread in die Schlange einreiht (die high 32bits werden um 1 erhöht) gibt es zwei Möglichkeiten: Entweder ein anderer Thread ist vor dem eigenen Thread in der Schlange oder nicht.
 
 /**/
-Wenn jemand gerade vor einem ist kann man regelmäßig prüfen, ob so viele nun an der Reihe waren (siehe @algo-queue-trylock).
-Wenn niemand vor einem ist, ist man selber an der Reihe.
-So kommt ein Thread garantiert dazu, das Lock zu Sperren. 
+Wenn ein anderer Thread gerade vor einem ist, kann man regelmäßig prüfen, wieviele bereits an der Reihe waren (siehe @algo-queue-trylock).
+Wenn kein Thread vor einem ist, ist man selber an der Reihe.
+So kommt ein Thread garantiert dazu, das Lock zu sperren. 
 /**/
 
 #algo({
     import algorithmic: *
-    Function("QueueLock-WLock", args: ("lock",), {
+    Function("QueueLock-Lock", args: ("lock",), {
       Assign([old], FnI[AtomicIncr][lock.h32])
       Assign([slot], [old.h32])
       Assign([pos], [old.l32])
@@ -452,6 +455,8 @@ So kommt ein Thread garantiert dazu, das Lock zu Sperren.
     })
 }, caption: [QueueLock-LockSlot]) <algo-queue-trylock>
 
+Nachdem ein Thread an der Reihe war verlässt dieser die Schlange und veringert zum einen die high 32bits, weil nun ein Thread weniger in der Schlange ist und erhöht zum anderen die low 32bits, weil ein Thread mehr nun fertig ist (siehe @algo-queue-unlock).
+
 #algo({
     import algorithmic: *
     Function("QueueLock-Unlock", args: ("lock",), {
@@ -463,178 +468,187 @@ So kommt ein Thread garantiert dazu, das Lock zu Sperren.
 }, caption: [QueueLock-Unlock]) <algo-queue-unlock>
 /**/
 
-Optimistic-Concurrency ist mit diesem Lock einfach, in dem zu begin einer Lesenden operation die unteren 32bit des 64bit Locks als Version gespeichert werden.
-Ist die Version ungerade so ist das Lock gerade in einem schreibendem Modus gesperrt und die Lesende operation muss warten.
-Ist die Version gerade so kann die lesende Operation beginnen.
-Wenn die lesende Operation fertig ist muss sie nur die gespeicherte Version mit den unteren 32bit des Locks vergleichen.
-Sind diese unterschiedlich so muss die lesende Operation neu starten; sind sie gleich, so war die Operation erfolgreich.
+Optimistic-Concurrency lässt sich mit diesem Lock relativ simpel umsetzen, in dem zu Beginn einer lesenden Operation die unteren 32bit des 64bit Locks als Version gespeichert werden.
+Ist die Version ungerade, so ist das Lock in einem schreibendem Modus gesperrt und die lesende Operation muss warten.
+Ist die Version gerade, so kann die lesende Operation beginnen.
+Wenn die lesende Operation fertig ist, muss sie nur die gespeicherte Version mit den unteren 32bit des Locks vergleichen.
+Sind diese unterschiedlich, so muss die lesende Operation neu starten; sind sie gleich, so war die Operation erfolgreich.
 
 == Vielschrittige Transaktionen
 
 Vielschrittige Transaktionen sind Datenbankoperationen, die in einer Transaktion mehrere Operationen so ausführen, dass sie für den Rest der Datenbank als eine einzige Operation wirken.
-Wenn eine Transaktion beispielsweise die Schritte beinhaltet "Setze A auf 1 und B auf 2" und A und B vorher 0 wahren, so gibt es keinen Zeitpunkt an dem A als 1 und B als 0 oder A als 0 und B als 2 gelesen werden kann.
+Wenn eine Transaktion beispielsweise die Schritte beinhaltet "Setze A auf 1 und B auf 2" und A und B vorher 0 waren, so gibt es keinen Zeitpunkt an dem A als 1 und B als 0 oder A als 0 und B als 2 gelesen werden können.
 Es kann nur A als 0 und B als 0 oder A als 1 und B als 2 gelesen werden.
 
 Damit solche Transaktionen in einer Datenbank effizient koordiniert werden, wird oft auf Lock-Manager wie VLL @vll, der auch in Dragonfly genutzt wird, zurückgegriffen.
 Auf der Suche nach einem angemessenen Lock-Manager ist mir aufgefallen, dass nur wenige für meine gewählte Architektur passend sind und diese oft deutlich mehr Funktionalität mitbringen als ich benötige.
-Daher habe ich mich dazu entschieden, ein eigenes Transaktionsscheme zu entwickeln, welches möglichst gut auf meine Datenbank passt.
+Daher habe ich mich dazu entschieden, ein eigenes Transaktionsschema zu entwickeln, welches möglichst gut auf meine Datenbank passt.
 
 Mein Transaktionsschema funktioniert so:
   + Alle SmallMaps, die für die Transaktion benötigt werden, werden als Pointer aus dem Directory geladen und in ein Array gespeichert.
   + Die SmallMaps werden nach ihrem Pointerwert in aufsteigender Reihenfolge sortiert.
-  + Die Locks der SmallMaps werden in der Reihenfolge nun aufsteigend gesperrt. Es kann passieren, dass eine Falsche SmallMap gesperrt wird, da zwischen Punkt 1 und dem Sperren der SmallMap der Wert, der für die Transaktion erforderlich ist, nach dem in @ch-extend beschrieben Verfahren, nun in einer anderen SmallMap ist, dann wird die falsch gesperrte SmallMap einfach wieder entsperrt und die richtige SmallMap gesucht und in das sortierte Array an die richtige stelle eingefügt. 
+  + Die Locks der SmallMaps werden in der Reihenfolge nun aufsteigend gesperrt. Es kann passieren, dass eine falsche SmallMap gesperrt wird, da zwischen Punkt 1 und dem Sperren der SmallMap der Wert, der für die Transaktion erforderlich ist, sich nun in einer anderen SmallMap befindet (siehe @ch-extend). Dann wird die falsch gesperrte SmallMap einfach wieder entsperrt und die richtige SmallMap gesucht und in das sortierte Array an die richtige Stelle eingefügt. 
 
-Bei Punkt 3 ist anzumerken, dass alle bereits gesperrten Pointer, die einen größeren Wert haben als der neu geladene, wieder entsperrt werden müssen, um Deadlocks zu vermeiden.
+Zu Punkt 3 ist anzumerken, dass alle bereits gesperrten Pointer, die einen größeren Wert haben als der neu geladene, wieder entsperrt werden müssen, um Deadlocks zu vermeiden.
 
-Diese Art vielschrittige Transaktionen zu machen ist sicher vor Deadlocks, da die SmallMaps immer in aufsteigender Reihenfolge gesperrt werden.
-Intuitiv ist das schlüssig und es lässt sich auch durch einen einfachen Beweis durch Widerspruch zeigen, das Deadlocks so vermieden werden:
-  + Nehmen wir an, es gibt ein Deadlock, so muss dieser entstehen, weil ein Thread \#1 auf eine SmallMap wartet, die ein anderer Thread \#2 gesperrt hat und Thread \#2 wartet auf eine SmallMap die Thread \#1 gesperrt hat.
-  + Alle SmallMaps die ein Thread sperrt werden in einer aufsteigenden Reihenfolge gesperrt.
-  + Thread \#1 wartet auf eine SmallMap $s_1$, die größer ist, als alle bereits gesperrten.
-  + Thread \#2 wartet auf eine SmallMap $s_2$, die größer ist, als alle bereits gesperrten.
-  + Thread \#1 wartet auf $s_1$, die von Thread \#2 gesperrt ist und größer ist als alle bereits gesperrten von Thread \#1 aber Thread \#2 wartet auf $s_2$, die von Thread \#1 gesperrt ist.
-  + Da Thread \#2 $s_1$ gesperrt hat und $s_2$ sperren will muss $s_1 < s_2$, da Thread \#1 $s_2$ gesperrt hat und $s_1$ sperren will muss also auch $s_2 < s_1$ gelten.
+Diese Art vielschrittige Transaktionen durchzuführen, ist sicher vor Deadlocks, da die SmallMaps immer in aufsteigender Reihenfolge gesperrt werden.
+Intuitiv ist das schlüssig und es lässt sich auch durch einen einfachen Beweis durch Widerspruch zeigen, dass Deadlocks so vermieden werden:
+  + Annahme: Es gibt ein Deadlock. Dieser muss entstanden sein, weil ein Thread \#1 auf eine SmallMap wartet, die ein anderer Thread \#2 gesperrt hat und Thread \#2 wartet auf eine SmallMap die Thread \#1 gesperrt hat.
+  + Per Definition: Alle SmallMaps, die ein Thread sperrt, werden in einer aufsteigenden Reihenfolge gesperrt.
+  + Aus 2 folgt: Thread \#1 wartet auf eine SmallMap $s_1$, die größer ist als alle bereits gesperrten von Thread \#1. Thread \#2 wartet auf eine SmallMap $s_2$, die größer ist als alle bereits gesperrten von Thread \#2.
+  + Aus 1 und 3 folgt: Thread \#1 wartet auf $s_1$, die von Thread \#2 gesperrt ist und größer ist als alle bereits gesperrten von Thread \#1, aber Thread \#2 wartet auf $s_2$, die von Thread \#1 gesperrt ist.
+  + Aus 4 folgt: Da Thread \#2 $s_1$ gesperrt hat und $s_2$ sperren will, muss $s_1 < s_2$ sein. Da Thread \#1 $s_2$ gesperrt hat und $s_1$ sperren will, muss also auch $s_2 < s_1$ sein.
   + Daraus folgt: $s_1 < s_2 < s_1$ was ein Widerspruch ist und daher nicht auftreten kann.
 
 == Performance messen und vergleichen <ch-messen>
 
 Das Messen der Performance hat sich schwieriger als erwartet herausgestellt.
-Nicht nur ist es der Fall, dass es keinen verbreitetn Test für Transaktionen gibt, sondern auch, dass das oft genutzte Tool "Memtier", das von Redis eingeführt und entwickelt wurde zum testen von Datenbanken @memtier , sich als weniger Skalierbar als meine implementation der Datenbank heraustellt und daher keine festen Ergebnisse liefern konnte.
+Nicht nur ist es der Fall, dass es keinen verbreiteten Test für vielschrittige Transaktionen gibt, sondern auch, dass das oft genutzte Tool "Memtier", das von Redis zum Testen von Datenbanken eingeführt wurde @memtier,  sich als weniger skalierbar als meine Implementation der Datenbank herausstellt und daher keine festen Ergebnisse liefern konnte.
 
-#figure(image("./assets/round3 memtier.png"), caption: [Ein Test mit Memtier mit problematischen Werten]) <abb-memtier-values>
+#figure(image("./assets/round3 memtier.png"), caption: [Anfragen pro Sekunde vs CPU-Kerne: Ein Test mit Memtier mit problematischen Werten]) <abb-memtier-values>
 
-In @abb-memtier-values ist zu erkennen, wie die Werte, die wie in @ch-ergebnisse erhoben wurden, von "smade Ops/Sec" mit 10 Kernen einbrechen, danach aber wieder größer werden, was im Kontext keinen Sinn ergibt.
-Auch das Dragonfly nicht über 12 Kerne Skaliert ist Fragwürdig.
-Zusammen mit vielen Tests habe ich herausgefunden, dass memtier, selbst wenn es die gleiche Menge an Ressource zur verfügung hat, deutlich mehr Leistung benötigt als die Datenbanken.
-Daher ist es schwierig damit und mit meinen begrenzten Computer-Ressourcen gute Daten zu erheben.
-Um dieses Problem zu umgehen habe ich zusätzlich ein Tool namens "Loader" implementiert, dass die Aufgabe des Messens übernehmen soll.
+In @abb-memtier-values ist zu erkennen, wie die Werte (siehe auch @ch-ergebnisse) von "smade Ops/Sec" mit 10 Kernen einbrechen, danach aber wieder größer werden, was im Kontext keinen Sinn ergibt.
+Auch, dass Dragonfly nicht über 12 Kerne skaliert, ist fragwürdig.
+Zusammen mit vielen weiteren Tests habe ich herausgefunden, dass Memtier, selbst wenn es die gleiche Menge an Ressourcen zur Verfügung hat, deutlich mehr Leistung benötigt als die Datenbanken.
+Daher ist es schwierig, damit und mit meinen begrenzten Computer-Ressourcen gute Daten zu erheben.
+Um dieses Problem zu umgehen, habe ich zusätzlich ein Tool namens "Loader" entwickelt und implementiert, das die Aufgabe des Messens übernehmen soll.
 
 Aber was wird überhaupt gemessen?
-Drei Metriken sind besonders wichtig beim betrachten von Architekturunterschieden zwischen Datenbanken:
+Drei Metriken sind besonders wichtig beim Betrachten von Architekturunterschieden zwischen Datenbanken:
   - Latenz
   - Durchsatzleistung
   - Skalierbarkeit
 
-Hierbei ist zu beachten, dass Zwar im Allgemeinen oft $"Latenz" prop 1 / "Durchsatzleistung"$ gilt, dass aber nicht der Fall sein muss für viele Designs und die Latenz ja auch für diverse Perzentile betrachtet werden sollte.
-Für den Vergleich habe ich also diese Metriken ausgewählt in diesen Einheiten:
+Hierbei ist zu beachten, dass zwar im Allgemeinen oft $"Latenz" prop 1 / "Durchsatzleistung"$ gilt, das aber nicht der Fall sein muss und die Latenz ja auch für diverse Perzentile betrachtet werden sollte.
+Für den Vergleich habe ich also folgende Metriken und Einheiten ausgewählt:
   
-  - Latenz in $mu s$ für Durschnitt, p50, p80, p90, p99, p99.9, p99.995, und p99.999
+  - Latenz in $mu s$ für Durchschnitt, p50, p80, p90, p99, p99.9, p99.995, und p99.999
   - Durchsatzleistung in Anfragen pro Sekunde (QPS)
   - Skalierbarkeit in $%$. Sie ergibt sich aus der folgenden Rechnung: $"Skalierbarkeit" = "QPS mit N Kernen"/"QPS mit 1 Kern"$
 
-Gemessen wurden diese Metriken so:
+Gemessen wurden diese Metriken durch mein Tool, Loader, wie folgt:
 
-Als erster wird ein Threadpool gestartet und jeder Thread verbindet sich mit einer festen Anzahl an Verbindungen mit der jeweiligen Datenbank.
-Sobald eine Verbindungen verbunden ist startet diese Anfragen an die Datenbank zu schicken mit einem festgelegten Format.
-Das passiert so lange, bis jede Verbindung Anfragen schickt und dann geht das Messen los, wobei 20 Sekunden lang gemessen wird.
+Als Erstes wird ein Threadpool gestartet und jeder Thread verbindet sich mit einer festen Anzahl an Verbindungen mit der jeweiligen Datenbank.
+Sobald eine Verbindung aufgebaut ist, beginnt diese Anfragen an die Datenbank zu schicken, mit einem festgelegten Format.
+Sobald jede Verbindung Anfragen schickt, wird mit der Messung begonnen.
+Gemessen wird dann 20 Sekunden lang unter Volllast.
 Für jede Anfrage wird die Latenz gemessen und gespeichert.
-Die Durchsatzleistung ergibt sich nach den 20 Sekunden aus den gesammt gemessenen Anfragen geteilt durch 20 Sekunden.
-Die Latenz-Metriken (Durchschnitt, p50 etc. etc.) ergeben sich aus der Agregation von den gespeicherten Latenzen.
+Die Durchsatzleistung ergibt sich nach den 20 Sekunden aus den gesamt gemessenen Anfragen geteilt durch 20 Sekunden.
+Die Latenz-Metriken (Durchschnitt, p50 etc. etc.) ergeben sich aus der Akkumulation der gespeicherten Latenzen.
 
-Dieser Test wird für die Datenbanken mit unterschiedlichen Anzahl an Kernen durchgeführt woraus die Skalierbarkeit abgelitten werden kann.
+Dieser Test wird für die Datenbanken mit unterschiedlicher Anzahl an Kernen durchgeführt, woraus die Skalierbarkeit abgeleitet werden kann.
 
-Außerdem müssen mehrere Workloads getestet werden, um verschiedene Scenarien zu simulieren.
-Ich habe mich für 8 verschiedene Workloads entschieden die ein breites Spektrum an Fällen simulieren sollen:
-  + 8 Pipelined inserts (pipelined bedeutet, dass sie alle gleichzeitig geschickt werden ohne auf einzelne Antworten zu warten). Das ist ein writeonly Test, der passieren kann, wenn z.B. eine Datenbank von einer anderen Quelle befüllt wird.
-  + 90% Read, 10% Write. Das ist ein Workload was sehr Typisch ist, da typischer weise deutlich mehr Daten abgerufen werden als sie geschrieben werden. Dieses Workload wird sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet (um hotspots zu simulieren) und in beiden Fällen mit einer Pipeline von 1 und 8 getestet.
-  + 10% Read, 90% Write. Dieses Workload ist eher untypisch aber relevant um zu erkennen, ob lese Operationen möglicherweise von Schreiboperationen verdrängt werden. Dieses workload wird auch sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilten Schlüsselverteilung getestet.
-  + 8 writes in einer Transaktion. Dieses Workload überprüft die Performance bei vielen langlaufenden Transaktionen.
+Außerdem müssen mehrere Workloads getestet werden, um verschiedene Szenarien zu simulieren.
+Ich habe mich für 8 verschiedene Workloads entschieden, die ein breites Spektrum an Fällen simulieren sollen:
+  + 8 Pipelined Inserts (pipelined bedeutet, dass alle Anfragen gleichzeitig geschickt werden, ohne auf einzelne Antworten zu warten). Das ist ein writeonly Szenario, das auftreten kann, wenn eine Datenbank von einer anderen Quelle befüllt wird.
+  + 90% Read, 10% Write. Das ist ein Workload, der sehr typisch ist, da oftmals deutlich mehr Daten abgerufen werden, als geschrieben werden. Dieser Workload wird sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilter Schlüsselverteilung getestet (um Hotspots zu simulieren) und in beiden Fällen mit einer Pipeline von 1 und 8 getestet.
+  + 10% Read, 90% Write. Dieser Workload ist eher untypisch, aber relevant, um zu erkennen, ob Leseoperationen möglicherweise von Schreiboperationen verdrängt werden. Dieser Workload wird auch sowohl mit einer gleichförmigen Schlüsselverteilung als auch mit normalverteilter Schlüsselverteilung getestet.
+  + 5 Writes in einer Transaktion. Dieser Workload überprüft die Performance bei vielen langlaufenden Transaktionen.
 
 = Ergebnisse <ch-ergebnisse>
 
-Die Tests wurden wie in @ch-messen beschrieben durchgeführt auf AWS Ubuntu x64 Instanzen mit 32 Kernen und 64 Virtuellen Kernen.
-Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf der selben AWS Instanz getestet um Probleme wie Temperaturschwankungen, Golden Samples, oder Noisy-Neighbours zu vermeiden.
-Zudem wurde jeder Test einmal durchgeführt wenn die Datenbank festgelegte Threads hatte und einmal ohne.
-Das heißt "affinity" und ist in den Ergebnissen mit "aff" oder "pinned" gekenzeichnet.
+Die Tests wurden auf AWS Ubuntu Intel x64 Instanzen mit 32 Kernen und 64 virtuellen Kernen durchgeführt (siehe auch  @ch-messen).
+Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf derselben AWS-Instanz getestet, um Probleme wie Temperaturschwankungen, golden Samples oder Noisy-Neighbours zu vermeiden.
+Zudem wurde jeder Test einmal durchgeführt, wenn die Datenbank festgelegte Threads hatte und einmal ohne.
+Das heißt "Affinity" und ist in den Ergebnissen mit "aff" gekenzeichnet.
+
+== Lese-dominierte Workloads
 
 Werfen wir zuerst einen Blick auf die Workloads, die keine Pipeline nutzen.
 
-Alle Graphen werden in die Darstellung wie in @abb-throughput-gsp1g haben.
+Alle Graphen für die Durschsatzleistung werden wie @abb-throughput-gsp1g dargestellt.
 In den Graphen ist meine Datenbank als "Smade" bezeichnet.
 Für die Durchsatzleistung sind auf der x-Achse die getesteten Kerne dargestellt und auf der y-Achse die gemessene Performance in Ops/Sec. 
-Hier ist also zu erkennen, dass die Affinity wenig einfluss auf die Durchsatzleistung der Datenbanken hat und das die Performance bei nur einem einzelnen Kern nahezu Identisch ist, unabhängig vom Design.
+In @abb-throughput-gsp1g ist zu erkennen, dass die Affinity wenig Einfluss auf die Durchsatzleistung der Datenbanken hat.
+Außerdem ist die Performance bei nur einem einzelnen Kern unabhängig vom Design nahezu identisch.
 
-#figure(image("./assets/GET-SET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 90% Get, 10% Set, pipeline=1, gaussian key distribution]) <abb-throughput-gsp1g>
-#figure(image("./assets/GET-SET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 90% Get, 10% Set, pipeline=1, gaussian Schlüsselverteilung]) <abb-latency-gsp1g>
+#figure(image("./assets/GET-SET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 90% Read, 10% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-throughput-gsp1g>
 
-In @abb-latency-gsp1g ist die Latenz der Datenbanken visualisiert mit 16 Kernen (bzw. 1 Kern im Fall von Redis, da Redis keine Konfiguration für mehrere Kerne erlaubt).
+In @abb-latency-gsp1g ist die Latenz der Datenbanken mit 16 Kernen (bzw. 1 Kern im Fall von Redis, da Redis keine Konfiguration für mehrere Kerne erlaubt) visualisiert.
 Wichtig ist hierbei die logarithmische Skalierung der y-Achse zu beachten.
 
-Zu erkennen ist, dass die Performance von Dragonfly und Smade recht nahe bei einander liegt, die Versionen mit Affinity aber gegen die Intuition eine etwas höhere Latenz haben.
+#figure(image("./assets/GET-SET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 90% Read, 10% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-latency-gsp1g>
 
-Gleiche Ergebnisse, mit relativ ähnlichen Erbgenissen gibt es auch für die Schreib dominierten Workloads.
-Entgegen der Intuition ist die Durchsatzleitung (@abb-throughput-sgp1g) und Latenz (@abb-latency-sgp1g) nicht bedeutend anders.
+Zu erkennen ist, dass die Performance von Dragonfly und Smade recht nahe beieinander liegt, die Versionen mit Affinity aber entgegen der Intuition eine etwas höhere Latenz haben.
 
-#figure(image("./assets/SET-GET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 10% Get, 90% Set, pipeline=1, gaussian Schlüsselverteilung]) <abb-throughput-sgp1g>
-#figure(image("./assets/SET-GET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 10% Get, 90% Set, pipeline=1, gaussian Schlüsselverteilung]) <abb-latency-sgp1g>
+== Schreib-dominierte Workloads
+
+Gleiche Ergebnisse, mit relativ ähnlichen Werten, gibt es auch für die schreib-dominierten Workloads.
+Entgegen der Intuition bleibt die Durchsatzleistung (@abb-throughput-sgp1g) und Latenz (@abb-latency-sgp1g) nahezu unverändert im Vergleich mit den lese-dominierte Workloads.
+
+#figure(image("./assets/SET-GET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 10% Read, 90% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-throughput-sgp1g>
+#figure(image("./assets/SET-GET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 10% Read, 90% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-latency-sgp1g>
+
+== Pipelined Workloads
 
 Auf den ersten Blick mag es so scheinen, als wäre "Smade" mit der Share Everything Architektur am schnellsten.
-Es stellt sich jedoch die Frage, ob das Tatsächlich an der Architektur liegt, oder villeicht an anderen Faktoren, wie die Implementation des I/Os.
-Um diese Frage zu beantworten lohnt es sich die pipelined und transaktionalen Workloads zu betrachten.
-Hierbei werden gleichbleibende Lasten, wie z.B. I/O weniger repräsentiert als in den Workloads mit nur einer einzigen Anfrage.
-Wenn der Abstand zwischen Dragonfly und Smade schrumpft ist das ein guter Indikator dafür, dass dieser Unterschied nur an dingen wie I/O liegt.
-
-#figure(image("./assets/SET Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 100% Set, pipeline=8, zufällige Schlüsselverteilung]) <abb-throughput-sgp8g>
+Es stellt sich jedoch die Frage, ob das tatsächlich an der Architektur liegt oder villeicht an anderen Faktoren, wie die Implementation des I/Os.
+Um diese Frage zu beantworten, lohnt es sich, die pipelined und transaktionalen Workloads anzuschauen.
+Hierbei werden gleichbleibende Lasten, wie z.B. I/O, weniger repräsentiert als in den Workloads mit nur einer einzigen Anfrage.
+Wenn der Abstand zwischen Dragonfly und Smade schrumpft, ist das ein guter Indikator dafür, dass dieser Performanceunterschied nur an architekturunabhänigen Faktoren wie I/O liegt.
 
 Wie in @abb-throughput-sgp8g zu erkennen ist, ist die Performance von Redis und Smade bei einem Kern wieder nahezu identisch.
 Im Kontrast dazu ist die Performance von Dragonfly mit einem Kern geringer als die von Redis und erst mit 2 Kernen holt Dragonfly dieses Defizit auf.
 Die Performancedifferenz zwischen Dragonfly und Smade wächst über die Kerne immer weiter.
-Während es bei einem Kern nur etwa 40% sind so beträgt diese bei 8 und mehr Kernen mehr als 100%.
-Es scheint also so, als würde Dragonfly hier deutlich weniger Skalieren, als im test mit nur einer Anfrage zur Zeit.
-Interesant ist hierbei die Latenzspitze im p99.999, die nicht bei 14 oder weniger Kernen existiert oder ohne Affinity, von Smade in @abb-latency-sgp8g anzuschauen.
-Während ich diese noch nicht eindeutig klären konnte scheint es so, als läge es an der Art und Weise wie ganz genau die Anfragen bearbeitet werden zusammen mit Unregelmäßigkeiten im System.
+Während es bei einem Kern nur etwa 40% sind, so beträgt diese bei 8 und mehr Kernen mehr als 100%.
+Es scheint also so, als würde Dragonfly hier deutlich weniger skalieren, als im Test mit nur einer Anfrage zurzeit.
 
-#figure(image("./assets/SET Latency.png"), caption: [Latenz $mu$s vs Perzentil: 100% Set, pipeline=8, zufällige Schlüsselverteilung]) <abb-latency-sgp8g>
+#figure(image("./assets/SET Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 100% Write, pipeline=8, zufällige Schlüsselverteilung]) <abb-throughput-sgp8g>
 
-Ein ähnliches aber noch extremeres Ergebniss ergibt sich bei den Transaktionen.
-Ich habe ja die Hypothese aufgestellt, dass Transaktionen besonders viel Overhead mit der Kommunikation in einer Shared Nothing Architektur haben und die Daten sind ein Indiz dafür.
+In @abb-latency-sgp8g sind die Latenzen dieses Tests dargestellt und es ist  zu erkennen, dass Dragonfly im Durchschnitt eine bedeutend langsamere Latenz als Smade hat. 
 
-#figure(image("./assets/MULTI SET 5 R Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: Transaktion mit 5x Set, zufällige Schlüsselverteilung]) <abb-throughput-m>
+#figure(image("./assets/SET Latency.png"), caption: [Latenz $mu$s vs Perzentil: 100% Write, pipeline=8, zufällige Schlüsselverteilung]) <abb-latency-sgp8g>
 
-In @abb-throughput-m ist zu erkennen, wie die Durchsatzleistung von Dragonfly nun deutlich hinter der von Redis bei einem Kern liegt, während Smade bei einem Kern ein kleines Bisschen vor Redis liegt.
-Dieser Datensatz ist in Kombination mit mit dem aus @abb-throughput-sgp8g extrem bedeutsam, denn vom äußeren Aufbau sind sie sehr sehr Ähnlich.
-Die Transaktion is Pipelined so auch die 8 Pipelined set commands.
+Interessant ist hierbei allerdings die Latenzspitze von Smade im p99.999, die nicht bei 14 oder weniger Kernen existiert oder bei Tests ohne Affinity.
+Während ich diese noch nicht eindeutig klären konnte, scheint es so, als läge es an der Art und Weise, wie ganz genau die Anfragen bearbeitet werden, zusammen mit Unregelmäßigkeiten im System.
+
+Ein ähnliches, aber noch extremeres Ergebnis ergibt sich bei den Transaktionen.
+Ich habe ja die Hypothese aufgestellt, dass Transaktionen besonders viel Overhead mit der Kommunikation in einer Shared Nothing Architektur haben und die Werte aus @abb-throughput-m sind ein Indiz dafür.
+
+#figure(image("./assets/MULTI SET 5 R Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: Transaktion mit 5x Write, zufällige Schlüsselverteilung]) <abb-throughput-m>
+
+In @abb-throughput-m ist zu erkennen, wie die Durchsatzleistung von Dragonfly nun deutlich hinter der von Redis bei einem Kern liegt, während Smade bei einem Kern ein kleines bisschen vor Redis liegt.
+Dieser Datensatz ist in Kombination mit dem aus @abb-throughput-sgp8g extrem bedeutsam, denn vom äußeren Aufbau sind die Anfragen sehr ähnlich.
+Die Transaktion ist pipelined, so auch die 8 pipelined Write-Anfragen.
 Auch vom I/O sind sie sehr ähnlich.
-Die Transaktion hat zwar nur 5 Set Anfragen in ihr drinne allerdings kommt eine Transaktion mit etwas mehr I/O Aufwand.
-Also  existiert in beiden Workloads etwa die gleiche Arbeit mit dem einzigen Unterschied, dass die Transaktion atomar passieren muss.
+Die Transaktion besteht zwar nur aus 5 Write-Anfragen, allerdings haben Transaktionen etwas mehr I/O-Aufwand.
+Also existiert in beiden Workloads etwa die gleiche Arbeit, mit dem einzigen Unterschied, dass die Transaktion atomar passieren muss.
 Dieser Unterschied erhöht die Performancedifferenz von den 100% auf mehr als 450% zwischen den beiden Datenbanken.
-Auch in der Latenz in @abb-latency-m wird ein Performanceeinbruch sichtbar.
+Auch in der Latenz in @abb-latency-m wird ein Performanceeinbruch von Dragonfly sichtbar.
 
-#figure(image("./assets/MULTI SET 5 R Latency.png"), caption: [Latenz $mu$s vs Perzentil: Transaktion mit 5x Set, zufällige Schlüsselverteilung]) <abb-latency-m>
+#figure(image("./assets/MULTI SET 5 R Latency.png"), caption: [Latenz $mu$s vs Perzentil: Transaktion mit 5x Write, zufällige Schlüsselverteilung]) <abb-latency-m>
 
-Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Transaktionen und die Latenz von Redis sinkt aber die Latenz von Dragonfly übertifft die von Redis bei den hohen Perzentilen und ist auch im Durchschnitt höher. 
+Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Anfragen und die Latenz von Redis sinkt, aber die Latenz von Dragonfly übertrifft die von Redis bei den hohen Perzentilen und ist auch im Durchschnitt höher als im anderen Test. 
 
 = Ergebnissdiskussion
 
-Nach den betrachten der Ergebnisse scheint es so, als wäre eine Share Everything Architektur in bestimmten Anwendungsfällen Alternativen überlegen.
-Der Fokus dieser Arbeit liegt auf der Einordnung der Share Everything Architektur und die Frage ist, wie anwendbar diese in anderen Fällen ist.
+Nach dem Betrachten der Ergebnisse scheint es so, als wäre eine Share Everything Architektur in bestimmten Anwendungsfällen den gängigen Alternativen überlegen.
+Der Fokus dieser Arbeit liegt auf der Einordnung der Share Everything Architektur, und die Frage ist, wie effizient diese sein kann.
 
 == Anwendbarkeit
 
-Die Ergebnisse zeigen, dass eine Share Everything Architektur einer Shared Nothing Architektur gegenüber viele Vorteile haben kann, doch haben sich auch bei meiner Arbeit einige  Probleme mit dieser Architektur gezeigt.
-Das signifikanteste ist, dass es für viele Datenstrukturen keine einfache Share Everything alternative gibt.
+Die Ergebnisse zeigen, dass eine Share Everything Architektur einer Shared Nothing Architektur gegenüber viele Vorteile haben kann, doch es haben sich bei meiner Arbeit auch einige Probleme mit dieser Architektur gezeigt.
+Eines der großen Probleme ist, dass es für viele Datenstrukturen keine einfache Share Everything Alternative gibt.
 Das gilt auch für viele Index-Strukturen.
-Es ist oft möglich, wenn auch mit viel Aufwand, diese in eine Shared Nothing Architekturen integrieren und es ist umso schwerer so eine Struktur effizient für Share Everything umzusetzen.
 Diese Ergebnisse sind also nur in einem sehr begrenzten Rahmen zu betrachten und sollten nicht weit über die in dieser Arbeit vorgestellte Datenbank ohne weitere Nachforschungen extrapoliert werden.
 
 == Qualität der Ergebnisse
 
-Auch wenn ich mir meiner Messmethodik recht sicher bin, ist der Umfang dieser Arbeit kaum genug um die vielen Faceten der Performance zu erfassen.
-Während Beispielsweise die Ergebnisse wie ich sie hier gezeigt habe in mehreren durchläufen relativ wiederholbar waren, wurden alle nur in einem sehr Spezifischen szenario erhoben.
-So stellt sich die Frage, ob die Ergebnisse zur gleichen Aussage kämen, wenn sie auf AMD Hardware oder ARM IP getestet werden würde oder wie sich die Datenbank verhält, wenn die Anzahl an Datenbankclients verändert wird. 
+Auch wenn ich mir meiner Messmethodik recht sicher bin, ist der Umfang der erhobenen Daten kaum ausreichend, um die vielen Faceten der Performance zu erfassen.
+Während beispielsweise die Ergebnisse, wie ich sie hier gezeigt habe, in mehreren Durchläufen relativ wiederholbar waren, wurden alle nur in einem sehr spezifischen Szenario erhoben.
+So stellt sich die Frage, ob die Ergebnisse zur gleichen Aussage kämen, wenn die Datenbank auf AMD Hardware oder ARM IP getestet werden würde oder wie sich die Datenbank verhält, wenn die Anzahl an Datenbankclients verändert wird. 
 
-Auch gibt es in der Datenbank noch einige Probleme die noch nicht vollständig behoben oder durchdrungen wurden, wie die angesprochene Latenzspitze oder einige Probleme der Speicherverwaltung wie, dass in bestimmten Szenarien scheinbar immernoch Speicher nicht recycelt wird.
+Auch gibt es in der Datenbank noch einige Probleme, die noch nicht vollständig behoben oder durchdrungen wurden, wie die angesprochene Latenzspitze oder einige Probleme der Speicherverwaltung unter anderem, dass in bestimmten Szenarien scheinbar Speicher nicht recycelt wird.
 Hierbei stellt sich die Frage, ob und zu welchen Maß diese Probleme die Performance der Architektur beinflussen.
 
-Um noch sicherere Ergebnisse zu erhalten bedarf es noch mehr Messung, auch wenn für diese Arbeit mehr als 10 Tausend Datenpunkte erhoben und betrachtet wurden, und die Datenbank sollte in einen Zustand gebracht werden, in dem sie als Production-Ready bezeichnet werden kann.
+Um noch sicherere Ergebnisse zu erhalten, bedarf es noch mehr Messungen, auch wenn für diese Arbeit mehr als 10 Tausend Datenpunkte erhoben und analysiert wurden.
+Die Datenbank sollte außerdem in einen Zustand gebracht werden, in dem sie als Production-Ready bezeichnet werden kann.
 
 == Mehrwert dieser Arbeit
 
 Es ist nicht so lange her, dass "Performance Engineering" daraus bestand, die Hardware auf dem neusten stand zu halten.
-Heutzutage wird es allerdings immer schwerer, sich auf ständige verbesserung der Leistung von Prozessoren zu verlassen um den steigenden Leistungsforderungen der digitalisierten Welt gerecht zu werden.
-Die in dieser Arbeit vorgeschlagene Architektur für In-Memory-Datenbanken bietet möglicherweise einen Ansatz für das Entwickeln von effizienteren Systemen.
-
-= Fazit und Ausblick
+Heutzutage wird es allerdings immer schwerer, sich auf ständige verbesserung der Leistung von Prozessoren zu verlassen, um den steigenden Leistungsforderungen der digitalisierten Welt gerecht zu werden.
+Die in dieser Arbeit vorgeschlagene Architektur für In-Memory-Datenbanken bietet möglicherweise einen Ansatz für das Entwickeln von Systemen, die bei gleichbleibender Hardware effizienter arbeiten können als bisherige.
 
 
 // #figure( image("./benchmark-results/round-3-intel-full-atillery/Limits of memtier.png"), caption: [Memtier performance Problem]) <fig-memtier-performance-limit>
