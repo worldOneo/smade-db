@@ -14,15 +14,6 @@
 
 #set quote(block: true)
 #set heading(numbering: "1.1")
-
-#linebreak()
-
-#align(center, text(17pt)[
-  *#title*
-])
-
-#set par(leading: 1.5em)
-#set block(spacing: 2em)
 #show heading: it => [
   #set par(leading: 0.65em)
   #block(it, below: 1em)
@@ -31,27 +22,73 @@
   #set par(leading: 0.65em)
   #it
 ]
+
+#v(30%)
+#align(center, 
+[#text(17pt)[
+  *#title*
+]
+
+#text(13pt)[
+  *Effizienz von In-Memory-Datenbanken steigern*
+]])
+
 #let bll = false
 
-#align(center)[#info.name]
+#set par(leading: 0.5em)
+#align(center)[
+#info.project - 2024
 
+#info.name
+]
+
+#set block(spacing: 2em)
+#set par(leading: 1.5em)
+#pagebreak()
 
 #text(15pt)[
   *Projektüberblick*
 ]
+#set par(justify: true)
 
 Ziel dieses Projektes ist es die weit verbreitete Shared Nothing Architektur, die in vielen Computersystemen genutzt wird, kritisch im Gebiet der In-Memory-Datenbanken zu betrachten.
-Hierbei steht besonders die dazu orthognale Share Everything Architektur im Fokus, in der eine alternative Datenbank implementiert wird.
-Diese alternative Datenbank wird mit verbreiteten Datenbanken verglichen, um die Charakteristiken dieser Architektur zu ermitteln.
+Hierbei steht besonders die von mir vorgestellte und dazu gegenteilige Share Everything Architektur im Fokus, in der ich eine Datenbank implementiere.
+Diese Datenbank ist eine Alternative zu aktuell verbreiteten Datenbanken und wird mit diesen verglichen, um die Charakteristiken der Architekturen zu ermitteln.
 
-#linebreak()
+Für den Vergleich im Bereich der In-Memory-Datenbanken habe ich den Industriestandard Redis und die alternative Datenbank Dragonfly genutzt.
+Durch diese Datenbanken können spezialisierte Architekturen für einen CPU-Kern (Redis) oder Architekturen, die über mehrere CPU-Kerne skalieren (Dragonfly) mit den selben Tests verglichen werden.
+In einem Vergleich habe ich diesen Datenbanken meine selbst entwickelte Datenbank (Smade) mit der von mir definierten Share Everything Architektur gegenüber gestellt.
 
-Zentrale Aspekte der Arbeit sind dabei:
-  + Die implementierung von effizienten Concurrency-Primitiven
+In mehreren Testreihen (über 10 Tausend Datenpunkte) habe ich festgestellt, dass die Share Everything Architektur durchaus konkurrenzfähig mit der Shared Nothing Architektur ist.
+Besonders in transaktionalen Workloads scheint die Share Everything Architektur deutliche Performance-Vorteile zu haben.
+Vor dem Hintergrund der steigenden Leistungsanforderungen der digitalisierten Welt erscheint es sinnvoll, nicht nur auf die Leistungssteigerung der Prozessoren zu setzen, sondern gleichzeitig auch die dafür notwendige Architektur der Datenbanken weiterzuentwickeln.
+Meine hier vorgestellte Share Everything Architektur kann dafür ein Ansatz sein.
+Für eine genauere Betrachtung ist es natürlich wichtig, dass weitere Tests noch ausführlicher und umfangreicher durchgeführt werden, um definitive Antworten zu erhalten.
+
+Zentrale Aspekte der Arbeit sind:
+  + Die Implementierung von effizienten Concurrency-Primitiven
   + Ein Algorithmus für die Umsetzung von vielschrittigen Transaktionen
   + Das effiziente Bearbeiten von parallelen Operationen über mehrere Kerne
 
-Alle drei Aspekte zusammen in einer Datenbank angewandt und mit verbreiteten Datenbanken vergleichen.  
+Diese drei Aspekte werden zusammen in meiner Datenbank Smade angewandt und mit den Datenbanken Redis und Dragonfly mit Blick auf Durchsatzleistung und Latenz verglichen.  
+
+/*
+#[
+
+#set par(leading: 0.65em)
+#set text(size: 9pt)
+#grid(
+  columns: (0.4fr, 1fr, 1fr),
+  rows: (auto, 2em, auto, 2em),
+  [ Durchsatzleistung #linebreak() mehr ist besser ], [ #image("assets/GET-SET P1 G Throughput.png") ],[ #image("assets/MULTI SET 5 R Throughput.png")   ],
+  [], [ @abb-throughput-gsp1g], [@abb-throughput-m],
+  [ Latenz #linebreak() weniger ist besser], [ #image("assets/GET-SET P1 G Latency.png") ],[ #image("assets/MULTI SET 5 R Latency.png") ],
+  [], [ @abb-latency-gsp1g ], [ @abb-latency-m ],
+
+)
+]
+
+*/
 
 #pagebreak()
 #outline(indent: true)
@@ -74,7 +111,10 @@ Alle drei Aspekte zusammen in einer Datenbank angewandt und mit verbreiteten Dat
 
 Viele Datenbanken berufen sich heutzutage auf eine "Shared Nothing" Architektur, um ihre Performanceziele und das Design der Datenbanken zu legitimieren.
 In dieser Arbeit wird das von mir entiwckelte und gegenteilige "Share Everything" Design betrachtet, um zu untersuchen, inwiefern dieses vergleichbar ist und welche Vor- und Nachteile es mit sich bringt.
-Hierfür wird eine Redis kompatible Alternative mit diesem orthogonalem Design implementiert und mit bestehenden Redis kompatiblen Datenbanken verglichen. 
+Hierfür wird von mir eine Redis kompatible Alternative im Share Everything Design implementiert und mit bestehenden Redis kompatiblen Datenbanken verglichen, um die Konkurrenzfähigkeit dieses Designs zu untersuchen.
+Im Ergebnniss wird deutlich, dass das Share Everything Design leistungsfähig ist und in bestimmten Szenarien deutlich effizienter als die Shared Nothing Architektur ist. 
+
+Share Everything kann also potenziell mit gleichbleibendem Resourcenaufwand mehr Arbeit verrichten oder bei gleichbleibender Arbeit den Resourcenaufwand verringern.
 
 = Motivation und Fragestellung
 
@@ -455,6 +495,8 @@ So kommt ein Thread garantiert dazu, das Lock zu sperren.
     })
 }, caption: [QueueLock-LockSlot]) <algo-queue-trylock>
 
+#if bll [
+
 Nachdem ein Thread an der Reihe war verlässt dieser die Schlange und veringert zum einen die high 32bits, weil nun ein Thread weniger in der Schlange ist und erhöht zum anderen die low 32bits, weil ein Thread mehr nun fertig ist (siehe @algo-queue-unlock).
 
 #algo({
@@ -466,7 +508,8 @@ Nachdem ein Thread an der Reihe war verlässt dieser die Schlange und veringert 
       })
     })
 }, caption: [QueueLock-Unlock]) <algo-queue-unlock>
-/**/
+
+]
 
 Optimistic-Concurrency lässt sich mit diesem Lock relativ simpel umsetzen, in dem zu Beginn einer lesenden Operation die unteren 32bit des 64bit Locks als Version gespeichert werden.
 Ist die Version ungerade, so ist das Lock in einem schreibendem Modus gesperrt und die lesende Operation muss warten.
@@ -562,12 +605,12 @@ Für die Durchsatzleistung sind auf der x-Achse die getesteten Kerne dargestellt
 In @abb-throughput-gsp1g ist zu erkennen, dass die Affinity wenig Einfluss auf die Durchsatzleistung der Datenbanken hat.
 Außerdem ist die Performance bei nur einem einzelnen Kern unabhängig vom Design nahezu identisch.
 
-#figure(image("./assets/GET-SET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 90% Read, 10% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-throughput-gsp1g>
+#figure(image("./assets/GET-SET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 90% Read, 10% Write, pipeline=1, normalverteilte Schlüssel]) <abb-throughput-gsp1g>
 
 In @abb-latency-gsp1g ist die Latenz der Datenbanken mit 16 Kernen (bzw. 1 Kern im Fall von Redis, da Redis keine Konfiguration für mehrere Kerne erlaubt) visualisiert.
 Wichtig ist hierbei die logarithmische Skalierung der y-Achse zu beachten.
 
-#figure(image("./assets/GET-SET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 90% Read, 10% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-latency-gsp1g>
+#figure(image("./assets/GET-SET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 90% Read, 10% Write, pipeline=1, normalverteilte Schlüssel]) <abb-latency-gsp1g>
 
 Zu erkennen ist, dass die Performance von Dragonfly und Smade recht nahe beieinander liegt, die Versionen mit Affinity aber entgegen der Intuition eine etwas höhere Latenz haben.
 
@@ -576,8 +619,8 @@ Zu erkennen ist, dass die Performance von Dragonfly und Smade recht nahe beieina
 Gleiche Ergebnisse, mit relativ ähnlichen Werten, gibt es auch für die schreib-dominierten Workloads.
 Entgegen der Intuition bleibt die Durchsatzleistung (@abb-throughput-sgp1g) und Latenz (@abb-latency-sgp1g) nahezu unverändert im Vergleich mit den lese-dominierte Workloads.
 
-#figure(image("./assets/SET-GET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 10% Read, 90% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-throughput-sgp1g>
-#figure(image("./assets/SET-GET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 10% Read, 90% Write, pipeline=1, normalverteilte Schlüsselverteilung]) <abb-latency-sgp1g>
+#figure(image("./assets/SET-GET P1 G Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 10% Read, 90% Write, pipeline=1, normalverteilte Schlüssel]) <abb-throughput-sgp1g>
+#figure(image("./assets/SET-GET P1 G Latency.png"), caption: [Latenz $mu$s vs Perzentil: 10% Read, 90% Write, pipeline=1, normalverteilte Schlüssel]) <abb-latency-sgp1g>
 
 == Pipelined Workloads
 
@@ -593,11 +636,11 @@ Die Performancedifferenz zwischen Dragonfly und Smade wächst über die Kerne im
 Während es bei einem Kern nur etwa 40% sind, so beträgt diese bei 8 und mehr Kernen mehr als 100%.
 Es scheint also so, als würde Dragonfly hier deutlich weniger skalieren, als im Test mit nur einer Anfrage zurzeit.
 
-#figure(image("./assets/SET Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 100% Write, pipeline=8, zufällige Schlüsselverteilung]) <abb-throughput-sgp8g>
+#figure(image("./assets/SET Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: 100% Write, pipeline=8, zufällige Schlüssel]) <abb-throughput-sgp8g>
 
 In @abb-latency-sgp8g sind die Latenzen dieses Tests dargestellt und es ist  zu erkennen, dass Dragonfly im Durchschnitt eine bedeutend langsamere Latenz als Smade hat. 
 
-#figure(image("./assets/SET Latency.png"), caption: [Latenz $mu$s vs Perzentil: 100% Write, pipeline=8, zufällige Schlüsselverteilung]) <abb-latency-sgp8g>
+#figure(image("./assets/SET Latency.png"), caption: [Latenz $mu$s vs Perzentil: 100% Write, pipeline=8, zufällige Schlüssel]) <abb-latency-sgp8g>
 
 Interessant ist hierbei allerdings die Latenzspitze von Smade im p99.999, die nicht bei 14 oder weniger Kernen existiert oder bei Tests ohne Affinity.
 Während ich diese noch nicht eindeutig klären konnte, scheint es so, als läge es an der Art und Weise, wie ganz genau die Anfragen bearbeitet werden, zusammen mit Unregelmäßigkeiten im System.
@@ -605,7 +648,7 @@ Während ich diese noch nicht eindeutig klären konnte, scheint es so, als läge
 Ein ähnliches, aber noch extremeres Ergebnis ergibt sich bei den Transaktionen.
 Ich habe ja die Hypothese aufgestellt, dass Transaktionen besonders viel Overhead mit der Kommunikation in einer Shared Nothing Architektur haben und die Werte aus @abb-throughput-m sind ein Indiz dafür.
 
-#figure(image("./assets/MULTI SET 5 R Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: Transaktion mit 5x Write, zufällige Schlüsselverteilung]) <abb-throughput-m>
+#figure(image("./assets/MULTI SET 5 R Throughput.png"), caption: [Durchsatzleistung Ops/Sec vs Kerne: Transaktion mit 5x Write, zufällige Schlüssel]) <abb-throughput-m>
 
 In @abb-throughput-m ist zu erkennen, wie die Durchsatzleistung von Dragonfly nun deutlich hinter der von Redis bei einem Kern liegt, während Smade bei einem Kern ein kleines bisschen vor Redis liegt.
 Dieser Datensatz ist in Kombination mit dem aus @abb-throughput-sgp8g extrem bedeutsam, denn vom äußeren Aufbau sind die Anfragen sehr ähnlich.
@@ -616,7 +659,7 @@ Also existiert in beiden Workloads etwa die gleiche Arbeit, mit dem einzigen Unt
 Dieser Unterschied erhöht die Performancedifferenz von den 100% auf mehr als 450% zwischen den beiden Datenbanken.
 Auch in der Latenz in @abb-latency-m wird ein Performanceeinbruch von Dragonfly sichtbar.
 
-#figure(image("./assets/MULTI SET 5 R Latency.png"), caption: [Latenz $mu$s vs Perzentil: Transaktion mit 5x Write, zufällige Schlüsselverteilung]) <abb-latency-m>
+#figure(image("./assets/MULTI SET 5 R Latency.png"), caption: [Latenz $mu$s vs Perzentil: Transaktion mit 5x Write, zufällige Schlüssel]) <abb-latency-m>
 
 Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Anfragen und die Latenz von Redis sinkt, aber die Latenz von Dragonfly übertrifft die von Redis bei den hohen Perzentilen und ist auch im Durchschnitt höher als im anderen Test. 
 
@@ -646,10 +689,14 @@ Die Datenbank sollte außerdem in einen Zustand gebracht werden, in dem sie als 
 
 == Mehrwert dieser Arbeit
 
-Es ist nicht so lange her, dass "Performance Engineering" daraus bestand, die Hardware auf dem neusten stand zu halten.
-Heutzutage wird es allerdings immer schwerer, sich auf ständige verbesserung der Leistung von Prozessoren zu verlassen, um den steigenden Leistungsforderungen der digitalisierten Welt gerecht zu werden.
+Es ist nicht so lange her, dass "Performance Engineering" daraus bestand, die Hardware auf dem neusten Stand zu halten.
+Heutzutage wird es allerdings immer schwerer, sich auf ständige verbesserung der Leistung von Prozessoren zu verlassen, um den steigenden Leistungsanforderungen der digitalisierten Welt gerecht zu werden.
 Die in dieser Arbeit vorgeschlagene Architektur für In-Memory-Datenbanken bietet möglicherweise einen Ansatz für das Entwickeln von Systemen, die bei gleichbleibender Hardware effizienter arbeiten können als bisherige.
 
+= Quellcodeverweis
+
+Der gesamte Code, alle Grafiken, Benchmarkergebnisse und Scripts des Projekts können auf #link("https://github.com/worldOneo/smade-db")[GitHub] #footnote[https://github.com/worldOneo/smade-db] eingesehen werden.
+Für die Replizierbarkeit der Ergebnisse ist es wichtig zu beachten, den Stand des Quellcodes zum Zeitpunkt der Tests zu betrachten, da die Datenbank nach den Tests weiterentwickelt wurde.
 
 // #figure( image("./benchmark-results/round-3-intel-full-atillery/Limits of memtier.png"), caption: [Memtier performance Problem]) <fig-memtier-performance-limit>
 
@@ -657,4 +704,4 @@ Die in dieser Arbeit vorgeschlagene Architektur für In-Memory-Datenbanken biete
 
 #bibliography("biblio.yaml", style: "deutsche-sprache")
 
-#set page(columns: 1)
+#pagebreak()
