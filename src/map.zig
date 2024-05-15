@@ -526,7 +526,10 @@ pub const ExtendibleMap = struct {
 
     const AcquireState = struct {
         hash: u64,
-        slot: ?u32,
+        queued: ?struct {
+            slot: ?u32,
+            lock: *lock.QueueLock(SmallMap),
+        } = null,
         this: *This,
     };
 
@@ -540,29 +543,36 @@ pub const ExtendibleMap = struct {
         pub fn drive(s: *AcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
-            var map_lock: *lock.QueueLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-            var locked = false;
-            if (s.slot) |slot| {
-                locked = map_lock.tryDeque(slot);
-            } else if (map_lock.queue()) |slot| {
-                s.slot = slot;
-            } else {
-                locked = true;
-            }
 
-            if (locked) {
-                // Dash Algorithm 3 line 11
-                // see ReadMachine
-
-                const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
-                const new_idx = currentIdx(new_dict, s.hash);
-                const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-
-                if (dict != new_dict or idx != new_idx or map_lock != new_map_lock) {
-                    map_lock.unlock();
-                    return .Incomplete;
+            if (s.queued) |q| {
+                var locked = false;
+                if (q.slot) |slot| {
+                    locked = q.lock.tryDeque(slot);
+                } else if (q.lock.queue()) |slot| {
+                    s.queued = .{ .slot = slot, .lock = q.lock };
+                } else {
+                    locked = true;
                 }
-                return Drive{ .Complete = .{ .map = &map_lock.value, .lock = map_lock } };
+
+                if (locked) {
+                    s.queued = null;
+                    // Dash Algorithm 3 line 11
+                    // see ReadMachine
+
+                    const new_dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
+                    const new_idx = currentIdx(new_dict, s.hash);
+                    const new_map_lock = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+
+                    if (dict != new_dict or idx != new_idx or q.lock != new_map_lock) {
+                        q.lock.unlock();
+                        return .Incomplete;
+                    }
+                    return Drive{ .Complete = .{ .map = &q.lock.value, .lock = q.lock } };
+                }
+            } else {
+                var map_lock: *lock.QueueLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+                s.queued = .{ .slot = null, .lock = map_lock };
+                return drive(s);
             }
             return .Incomplete;
         }
@@ -705,7 +715,6 @@ pub const ExtendibleMap = struct {
         return AcquireMachine.init(AcquireState{
             .hash = hash,
             .this = this,
-            .slot = null,
         });
     }
 
