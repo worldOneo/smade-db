@@ -89,7 +89,7 @@ pub const MultiState = struct {
     allocator: *alloc.LocalAllocator,
     data: *map.ExtendibleMap,
 
-    acquired: [MaxShards]map.ExtendibleMap.MAcquireItem = [_]map.ExtendibleMap.MAcquireItem{.{ .hash = 0, .lock = null }} ** MaxShards,
+    acquired: [MaxShards]map.ExtendibleMap.MAcquireItem = [_]map.ExtendibleMap.MAcquireItem{.{ .slot = null, .hash = 0, .lock = null }} ** MaxShards,
     commands: [MaxShards]resp.RespList = undefined,
     rollbacks: [MaxShards]?struct {
         value: map.Value,
@@ -244,6 +244,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                 s.acquired[s.shards_acquired] = map.ExtendibleMap.MAcquireItem{
                     .hash = 0,
                     .lock = whoops_acquired.lock,
+                    .slot = null,
                 };
                 s.shards_acquired += 1;
                 s.splitmachine = null;

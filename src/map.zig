@@ -507,7 +507,7 @@ pub const ExtendibleMap = struct {
     expansions: [maxDictExpansions]Dict,
 
     const Dict = struct {
-        segments: []std.atomic.Atomic(*lock.OptLock(SmallMap)),
+        segments: []std.atomic.Atomic(*lock.QueueLock(SmallMap)),
         level: u64,
         copied: bool,
     };
@@ -526,12 +526,13 @@ pub const ExtendibleMap = struct {
 
     const AcquireState = struct {
         hash: u64,
+        slot: ?u32,
         this: *This,
     };
 
     pub const AcquireResult = struct {
         map: *SmallMap,
-        lock: *lock.OptLock(SmallMap),
+        lock: *lock.QueueLock(SmallMap),
     };
 
     pub const AcquireMachine = state.Machine(AcquireState, AcquireResult, struct {
@@ -539,8 +540,13 @@ pub const ExtendibleMap = struct {
         pub fn drive(s: *AcquireState) Drive {
             const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
             const idx = currentIdx(dict, s.hash);
-            var map_lock: *lock.OptLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
-            if (map_lock.tryLock()) |map| {
+            var map_lock: *lock.QueueLock(SmallMap) = dict.segments[idx].load(std.atomic.Ordering.Monotonic);
+            var locked = false;
+            if (s.slot) |slot| {
+                locked = map_lock.tryDeque(slot);
+            } else if (map_lock.queue()) |slot| {
+                s.slot = slot;
+            } else {
                 // Dash Algorithm 3 line 11
                 // see ReadMachine
 
@@ -552,7 +558,7 @@ pub const ExtendibleMap = struct {
                     map_lock.unlock();
                     return .Incomplete;
                 }
-                return Drive{ .Complete = .{ .map = map, .lock = map_lock } };
+                return Drive{ .Complete = .{ .map = &map_lock.value, .lock = map_lock } };
             }
             return .Incomplete;
         }
@@ -560,7 +566,8 @@ pub const ExtendibleMap = struct {
 
     pub const MAcquireItem = struct {
         hash: u64,
-        lock: ?*lock.OptLock(SmallMap),
+        slot: ?u32,
+        lock: ?*lock.QueueLock(SmallMap),
     };
 
     const MAcquireState = struct {
@@ -606,7 +613,19 @@ pub const ExtendibleMap = struct {
                 return drive(s);
             }
 
-            if (old_lock.tryLock()) |_| {
+            var locked = false;
+            if (s.locks[s.locks_acquired].slot) |slot| {
+                if (old_lock.tryDeque(slot)) {
+                    locked = true;
+                }
+            } else if (old_lock.queue()) |slot| {
+                s.locks[s.locks_acquired].slot = slot;
+            } else {
+                locked = true;
+            }
+
+            if (locked) {
+                s.locks_acquired[s.locks_acquired].slot = null;
                 const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
                 const old_hash = s.locks[s.locks_acquired].hash;
                 const idx = currentIdx(dict, old_hash);
@@ -617,7 +636,7 @@ pub const ExtendibleMap = struct {
                     // first find the position to insert the new lock.
                     // for big arrays binary search could be used
                     var insert_idx: usize = 0;
-                    while (lock_sorter({}, s.locks[insert_idx], MAcquireItem{ .hash = 0, .lock = now_lock })) : (insert_idx += 1) {}
+                    while (lock_sorter({}, s.locks[insert_idx], MAcquireItem{ .hash = 0, .lock = now_lock, .slot = null })) : (insert_idx += 1) {}
 
                     // In the end remove oldlock and insert nowlock
                     if (insert_idx < s.locks_acquired) {
@@ -682,6 +701,7 @@ pub const ExtendibleMap = struct {
         return AcquireMachine.init(AcquireState{
             .hash = hash,
             .this = this,
+            .slot = null,
         });
     }
 
@@ -696,8 +716,8 @@ pub const ExtendibleMap = struct {
                 hash: u64,
                 this: *This,
                 creator: Creator,
-                lock: *lock.OptLock(SmallMap),
-                read: lock.OptLock(SmallMap).Read,
+                lock: *lock.QueueLock(SmallMap),
+                read: lock.QueueLock(SmallMap).Read,
                 machine: DepMachine,
             },
         };
@@ -788,7 +808,7 @@ pub const ExtendibleMap = struct {
 
     const SplitState = struct {
         this: *This,
-        with: *lock.OptLock(SmallMap),
+        with: *lock.QueueLock(SmallMap),
         hash: u64,
     };
 
@@ -883,7 +903,7 @@ pub const ExtendibleMap = struct {
     // Null indicates OOM or OOS
     pub fn split(this: *This, hash: u64, small_map: *SmallMap, allocator: *alloc.LocalAllocator) ?SplitMachine {
         var tmp: SmallMap = small_map.*;
-        var second_map: *lock.OptLock(SmallMap) = allocator.allocate(lock.OptLock(SmallMap)) orelse {
+        var second_map: *lock.QueueLock(SmallMap) = allocator.allocate(lock.QueueLock(SmallMap)) orelse {
             std.debug.print("OOM\n", .{});
             return null;
         };
@@ -902,8 +922,9 @@ pub const ExtendibleMap = struct {
         small_map.fillFromSplit(&tmp, 0, 0, allocator);
         var second: *SmallMap = &second_map.value;
         second.fillFromSplit(&tmp, 1, 0, allocator);
-        while (second_map.tryLock() == null) {
-            // this isn't bussy as tryLock is uncontendet
+
+        if (second_map.queue()) |_| {
+            unreachable;
         }
 
         return SplitMachine.init(SplitState{
@@ -920,7 +941,7 @@ pub const ExtendibleMap = struct {
 
         const one: u64 = 1;
         const entries: u64 = 16 * (one << @as(u6, @intCast(max_expansions + 1)));
-        var backing_slab = slab_allocator.alloc(std.atomic.Atomic(*lock.OptLock(SmallMap)), entries) catch return ExtendibleMapError.SlabAllocation;
+        var backing_slab = slab_allocator.alloc(std.atomic.Atomic(*lock.QueueLock(SmallMap)), entries) catch return ExtendibleMapError.SlabAllocation;
 
         // setup expansions
         for (0..(max_expansions + 1)) |i| {
@@ -930,7 +951,7 @@ pub const ExtendibleMap = struct {
             this.expansion_ptrs[i] = lock.OptLock(*Dict).init(&this.expansions[i]);
         }
         // setup slab
-        var first_map: *lock.OptLock(SmallMap) = local_allocator.allocate(lock.OptLock(SmallMap)) orelse return ExtendibleMapError.MapAllocation;
+        var first_map: *lock.QueueLock(SmallMap) = local_allocator.allocate(lock.QueueLock(SmallMap)) orelse return ExtendibleMapError.MapAllocation;
         first_map.value.clear(0);
 
         for (0..16) |i| {
@@ -1008,7 +1029,7 @@ pub const InsertAndSplitState = struct {
     map: *ExtendibleMap,
     allocator: *alloc.LocalAllocator,
     splitmachine: ?struct {
-        smallmap: *lock.OptLock(SmallMap),
+        smallmap: *lock.QueueLock(SmallMap),
         machine: ExtendibleMap.SplitMachine,
     },
     acquiremachine: ?ExtendibleMap.AcquireMachine,
