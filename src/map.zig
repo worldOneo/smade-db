@@ -547,6 +547,10 @@ pub const ExtendibleMap = struct {
             } else if (map_lock.queue()) |slot| {
                 s.slot = slot;
             } else {
+                locked = true;
+            }
+
+            if (locked) {
                 // Dash Algorithm 3 line 11
                 // see ReadMachine
 
@@ -625,7 +629,7 @@ pub const ExtendibleMap = struct {
             }
 
             if (locked) {
-                s.locks_acquired[s.locks_acquired].slot = null;
+                s.locks[s.locks_acquired].slot = null;
                 const dict: *Dict = s.this.dict.load(std.atomic.Ordering.Acquire);
                 const old_hash = s.locks[s.locks_acquired].hash;
                 const idx = currentIdx(dict, old_hash);
