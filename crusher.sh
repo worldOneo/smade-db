@@ -9,7 +9,7 @@ smade_threads=(1 2 4 6 8 10 12 14 16)
 
 for n in "${smade_threads[@]}"; do
     
-    ./main -threads $n -allocator-pages 400000 2>/dev/null &
+    ./main -threads $n -allocator-pages 400000 -max-expansions 24 2>/dev/null &
 
     sleep 5
     for payload in {0..7}; do 
@@ -24,7 +24,7 @@ done
 
 for n in "${smade_threads[@]}"; do
     
-    ./main -threads $n -allocator-pages 400000 -affinity-spacing 2 2>/dev/null &
+    ./main -threads $n -allocator-pages 400000 -affinity-spacing 2 -max-expansions 24 2>/dev/null &
 
     sleep 5
     
