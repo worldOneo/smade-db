@@ -282,6 +282,7 @@ const Config = struct {
     max_expansions: usize = 16,
     affinity_spacing: usize = 0,
     status_check: usize = 0,
+    port: usize = 3456,
 };
 
 fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, status: *std.atomic.Atomic(u64), config: Config) void {
@@ -302,7 +303,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
         std.os.exit(0);
     };
 
-    ring.bind(3456) catch |err| {
+    ring.bind(@intCast(config.port)) catch |err| {
         std.debug.print("#{} failed to bind Server: {s}\n", .{ worker_id, @errorName(err) });
         std.os.exit(0);
     };
@@ -491,6 +492,8 @@ pub fn main() !void {
             &config.affinity_spacing
         else if (seql(arg, "status-check"))
             &config.status_check
+        else if (seql(arg, "port"))
+            &config.port
         else
             null;
 
@@ -544,6 +547,9 @@ pub fn main() !void {
                 \\
                 \\ -affinity-spacing
                 \\     The number of cores between each worker core. If 0 no affinity is set.
+                \\
+                \\ -port
+                \\     The port to bind the database to. Defaults to 3456.
                 \\
             , .{});
             return;
