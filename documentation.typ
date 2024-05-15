@@ -4,7 +4,7 @@
 #import "@preview/bob-draw:0.1.0": render
 
 #set text(lang: "de", font: "Arial", size: 10pt, )
-#let title = [Share Everything - Eine andere Architektur für Datenbanken]
+#let title = [Shared Everything - Eine andere Architektur für Datenbanken]
 
 #set page(header: [
   #info.name #h(1fr) #title #h(1fr) 2024
@@ -12,6 +12,7 @@
   #h(1fr) #counter(page).display("1/1", both: true) #h(1fr)
 ], margin: (x: 2.5cm, y: 2cm))
 
+#set document(title: title, author: info.name, date: datetime(year: 2024, month: 5, day: 17))
 #set quote(block: true)
 #set heading(numbering: "1.1")
 #show heading: it => [
@@ -33,12 +34,12 @@
   *Effizienz von In-Memory-Datenbanken steigern*
 ]])
 
-#let bll = false
+#let bll = true
 
 #set par(leading: 0.5em)
 #align(center)[
-#info.project - 2024
-
+#info.project \
+2024 \
 #info.name
 ]
 
@@ -52,17 +53,17 @@
 #set par(justify: true)
 
 Ziel dieses Projektes ist es die weit verbreitete Shared Nothing Architektur, die in vielen Computersystemen genutzt wird, kritisch im Gebiet der In-Memory-Datenbanken zu betrachten.
-Hierbei steht besonders die von mir vorgestellte und dazu gegenteilige Share Everything Architektur im Fokus, in der ich eine Datenbank implementiere.
+Hierbei steht besonders die dazu gegenteilige Shared Everything Architektur im Fokus, in der ich eine Datenbank implementiere.
 Diese Datenbank ist eine Alternative zu aktuell verbreiteten Datenbanken und wird mit diesen verglichen, um die Charakteristiken der Architekturen zu ermitteln.
 
 Für den Vergleich im Bereich der In-Memory-Datenbanken habe ich den Industriestandard Redis und die alternative Datenbank Dragonfly genutzt.
 Durch diese Datenbanken können spezialisierte Architekturen für einen CPU-Kern (Redis) oder Architekturen, die über mehrere CPU-Kerne skalieren (Dragonfly) mit den selben Tests verglichen werden.
-In einem Vergleich habe ich diesen Datenbanken meine selbst entwickelte Datenbank (Smade) mit der von mir definierten Share Everything Architektur gegenüber gestellt.
+In einem Vergleich habe ich diesen Datenbanken meine selbst entwickelte Datenbank (Smade) mit der Shared Everything Architektur gegenüber gestellt.
 
-In mehreren Testreihen (über 10 Tausend Datenpunkte) habe ich festgestellt, dass die Share Everything Architektur durchaus konkurrenzfähig mit der Shared Nothing Architektur ist.
-Besonders in transaktionalen Workloads scheint die Share Everything Architektur deutliche Performance-Vorteile zu haben.
+In mehreren Testreihen (über 10 Tausend Datenpunkte) habe ich festgestellt, dass die Shared Everything Architektur durchaus konkurrenzfähig mit der Shared Nothing Architektur ist.
+Besonders in transaktionalen Workloads scheint die Shared Everything Architektur deutliche Performance-Vorteile zu haben.
 Vor dem Hintergrund der steigenden Leistungsanforderungen der digitalisierten Welt erscheint es sinnvoll, nicht nur auf die Leistungssteigerung der Prozessoren zu setzen, sondern gleichzeitig auch die dafür notwendige Architektur der Datenbanken weiterzuentwickeln.
-Meine hier vorgestellte Share Everything Architektur kann dafür ein Ansatz sein.
+Die Shared Everything Architektur kann dafür ein Ansatz sein.
 Für eine genauere Betrachtung ist es natürlich wichtig, dass weitere Tests noch ausführlicher und umfangreicher durchgeführt werden, um definitive Antworten zu erhalten.
 
 Zentrale Aspekte der Arbeit sind:
@@ -110,11 +111,11 @@ Diese drei Aspekte werden zusammen in meiner Datenbank Smade angewandt und mit d
 = Zusammenfassung
 
 Viele Datenbanken berufen sich heutzutage auf eine "Shared Nothing" Architektur, um ihre Performanceziele und das Design der Datenbanken zu legitimieren.
-In dieser Arbeit wird das von mir entiwckelte und gegenteilige "Share Everything" Design betrachtet, um zu untersuchen, inwiefern dieses vergleichbar ist und welche Vor- und Nachteile es mit sich bringt.
-Hierfür wird von mir eine Redis kompatible Alternative im Share Everything Design implementiert und mit bestehenden Redis kompatiblen Datenbanken verglichen, um die Konkurrenzfähigkeit dieses Designs zu untersuchen.
-Im Ergebnniss wird deutlich, dass das Share Everything Design leistungsfähig ist und in bestimmten Szenarien deutlich effizienter als die Shared Nothing Architektur ist. 
+In dieser Arbeit wird das gegenteilige "Shared Everything" Design betrachtet, um zu untersuchen, inwiefern dieses vergleichbar ist und welche Vor- und Nachteile es mit sich bringt.
+Hierfür wird von mir eine Redis kompatible Alternative im Shared Everything Design implementiert und mit bestehenden Redis kompatiblen Datenbanken verglichen, um die Konkurrenzfähigkeit dieses Designs zu untersuchen.
+Im Ergebnniss wird deutlich, dass das Shared Everything Design leistungsfähig ist und in bestimmten Szenarien deutlich effizienter als die Shared Nothing Architektur ist. 
 
-Share Everything kann also potenziell mit gleichbleibendem Resourcenaufwand mehr Arbeit verrichten oder bei gleichbleibender Arbeit den Resourcenaufwand verringern.
+Shared Everything kann also potenziell mit gleichbleibendem Resourcenaufwand mehr Arbeit verrichten oder bei gleichbleibender Arbeit den Resourcenaufwand verringern.
 
 = Motivation und Fragestellung
 
@@ -123,7 +124,7 @@ Interresant in dieser Situation ist allerdings, dass obwohl, oder eventuell gera
 Besonders bei Datenbanken, die Großteile der Arbeit im Arbeitsspeicher verrichten, ist es fragwürdig, ob eine Shared Nothing Architektur überlegen wäre.
 
 Um eine Diskussionsgrundlage und eine Referenz zu schaffen, ist es notwendig, vergleichbare Werte zu schaffen, anstatt sich auf die Versprechen der Shared Nothing Architektur zu verlassen.
-Die Frage, die sich hierbei stellt ist: Inwieweit ist eine Share Everything Architektur, für diesen Anwendungszweck, im Vergleich zur Shared Nothing Architektur effizienter?
+Die Frage, die sich hierbei stellt ist: Inwieweit ist eine Shared Everything Architektur, für diesen Anwendungszweck, im Vergleich zur Shared Nothing Architektur effizienter?
 
 = Hintergrund und theoretische Grundlagen
 
@@ -177,9 +178,9 @@ Die I/O Threads leiten Anfragen über den Message Bus an die Datenbankshards wei
 Es ist auch möglich, dass ein Thread sowohl als I/O Thread als auch Datenbankshard agiert.
 Entscheident ist, dass die Daten zwischen den Shards nicht geteilt werden.
 
-== Share Everything <ch-se>
+== Shared Everything <ch-se>
 
-Gegenüber diesem Shared Nothing Design steht das Share Everything Design.
+Gegenüber diesem Shared Nothing Design steht das Shared Everything Design.
 Das zu lösende Problem bleibt gleich, allerdings ist die Lösungsidee umgekehrt.
 Nimmt man an, dass kein Speicher zwischen CPU-Kernen geteilt werden soll, so muss es eine direkte Kommunikation zwischen den Kernen geben.
 Diese Kommunikation kann über den Concurrency-Primitiven "Channel" gehen.
@@ -188,7 +189,7 @@ Das ist ein effizienter Weg #footnote[oft Multi-Producer-Single-Consumer oder Si
 Die Channel haben allerdings einen Overhead in der Kommunikation.
 Muss ein CPU-Kern insgesamt 3 Datensätze aus der Datenbank lesen, muss dieser eventuell mit 3 verschiedenen CPU-Kernen kommunizieren, was 6 Nachrichten (3x hin und 3x zurück) bedeutet.
 Die Speicher der Channels sind geteilt und können daher einen Synchronisations-Overhead bedeuten.
-Das Share Everything Design zielt darauf ab, diese Kommunikation zu reduzieren und mit günstigen Synchronisations-Primitiven direkt in der Speicherstruktur die Korrektheit von Transaktionen zu garantieren.
+Das Shared Everything Design zielt darauf ab, diese Kommunikation zu reduzieren und mit günstigen Synchronisations-Primitiven direkt in der Speicherstruktur die Korrektheit von Transaktionen zu garantieren.
 Hierbei wird eine bedingte Cache- und Lockcontention beim Zugriff auf die Speicherstruktur gegen den definitiven Kommunikations-Overhead vom Shared Nothing Design abgewogen.
 
 #figure(
@@ -206,10 +207,10 @@ render(```
 | +------+  +------+  +------+  +------+  +------+  |
 |                                                   |
 +---------------------------------------------------+
-```), caption: [Share Everything Architektur]
+```), caption: [Shared Everything Architektur]
 ) <abb-se>
 
-In @abb-se ist dargestellt, wie ich die Share Everything Architektur definiert habe.
+In @abb-se ist dargestellt, wie die Shared Everything Architektur definiert ist.
 Hierbei gibt es analog zu der Shared Nothing Architektur I/O Threads, die die Datenbankverbindungen und Anfragen verwalten.
 Allerdings ist die Datenbank selber, im Kontrast zu der Shared Nothing Architektur nicht aufgeteilt, sondern eine einheitliche Datenstruktur, auf die alle I/O Threads Zugriff haben.
 Die I/O Threads selber führen die Anfragen auf der Datenbank aus und kommunizieren über die geteilte Speicherstruktur ihre Zugriffe so, dass die Datenbank kohärent bleibt.
@@ -229,7 +230,7 @@ Wird eine Reihe regulärer Anfragen geschickt, so muss in einer Shared Nothing A
 Da Transaktionen aber atomar ausgeführt werden müssen, muss hierbei bereits beim Aufsetzen der Transaktion mit allen Shards kommuniziert werden, um entsprechende Werte in der Datenbank zu sperren.
 Danach muss wieder mit allen betroffenen Shards kommuniziert werden, um die einzelnen Befehle auszuführen.
 
-Ich erhoffe mir, dass in einer Share Everything Architektur der Kommunikations-Overhead deutlich gesenkt werden kann und dadurch die Effizienz gesteigert wird.
+Ich erhoffe mir, dass in einer Shared Everything Architektur der Kommunikations-Overhead deutlich gesenkt werden kann und dadurch die Effizienz gesteigert wird.
 
 = Vorgehensweise, Materialien und Methoden
 
@@ -425,9 +426,9 @@ Das kann eine (Linked-)Liste sein, die nur 2 der 8byte-Felder braucht, um den He
 == Memory-Management <ch-alloc>
 
 Für das Memory Management habe ich als Grundlage eine vereinfachte Version von Microsofts mimalloc @mimalloc implementiert.
-Das ist nicht nur aus dem Grund notwendig, da Zig noch keinen starken und allgemeinen Allocator bereitstellt, sondern auch daher, dass ich aufgrund der Share Everything Architektur besondere Anforderungen an mein Memory-Management habe.
+Das ist nicht nur aus dem Grund notwendig, da Zig noch keinen starken und allgemeinen Allocator bereitstellt, sondern auch daher, dass ich aufgrund der Shared Everything Architektur besondere Anforderungen an mein Memory-Management habe.
 
-In der Share Everything Architektur stellt sich nämlich im Gegensatz zur Shared Nothing Architektur die Frage, wann es sicher ist, Speicher wieder an das Betriebssystem zurückzugeben.
+In der Shared Everything Architektur stellt sich nämlich im Gegensatz zur Shared Nothing Architektur die Frage, wann es sicher ist, Speicher wieder an das Betriebssystem zurückzugeben.
 Das Problem ist nämlich, dass ich aufgrund von der Verwendung von Optimistic-Concurrency gleichzeitig einen schreibenden und mehrere lesende Threads auf der gleichen Speicheradresse haben kann.
 Würde der schreibende Thread die Speicheradresse wieder zurück an das Betriebssystem geben, während ein lesender Thread noch die Daten liest, würde es zu Fehlern kommen.
 Um dieses Problem zu lösen, habe ich mich dazu entschieden, dass kein Speicher jemals an das Betriebssystem zurückgegeben wird, sondern beim Start der Datenbank eine feste Menge an Speicher angegeben wird und von der Datenbank verwendet wird.
@@ -624,7 +625,7 @@ Entgegen der Intuition bleibt die Durchsatzleistung (@abb-throughput-sgp1g) und 
 
 == Pipelined Workloads
 
-Auf den ersten Blick mag es so scheinen, als wäre "Smade" mit der Share Everything Architektur am schnellsten.
+Auf den ersten Blick mag es so scheinen, als wäre "Smade" mit der Shared Everything Architektur am schnellsten.
 Es stellt sich jedoch die Frage, ob das tatsächlich an der Architektur liegt oder villeicht an anderen Faktoren, wie die Implementation des I/Os.
 Um diese Frage zu beantworten, lohnt es sich, die pipelined und transaktionalen Workloads anzuschauen.
 Hierbei werden gleichbleibende Lasten, wie z.B. I/O, weniger repräsentiert als in den Workloads mit nur einer einzigen Anfrage.
@@ -665,13 +666,13 @@ Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Anfragen und die
 
 = Ergebnissdiskussion
 
-Nach dem Betrachten der Ergebnisse scheint es so, als wäre eine Share Everything Architektur in bestimmten Anwendungsfällen den gängigen Alternativen überlegen.
-Der Fokus dieser Arbeit liegt auf der Einordnung der Share Everything Architektur, und die Frage ist, wie effizient diese sein kann.
+Nach dem Betrachten der Ergebnisse scheint es so, als wäre eine Shared Everything Architektur in bestimmten Anwendungsfällen den gängigen Alternativen überlegen.
+Der Fokus dieser Arbeit liegt auf der Einordnung der Shared Everything Architektur, und die Frage ist, wie effizient diese sein kann.
 
 == Anwendbarkeit
 
-Die Ergebnisse zeigen, dass eine Share Everything Architektur einer Shared Nothing Architektur gegenüber viele Vorteile haben kann, doch es haben sich bei meiner Arbeit auch einige Probleme mit dieser Architektur gezeigt.
-Eines der großen Probleme ist, dass es für viele Datenstrukturen keine einfache Share Everything Alternative gibt.
+Die Ergebnisse zeigen, dass eine Shared Everything Architektur einer Shared Nothing Architektur gegenüber viele Vorteile haben kann, doch es haben sich bei meiner Arbeit auch einige Probleme mit dieser Architektur gezeigt.
+Eines der großen Probleme ist, dass es für viele Datenstrukturen keine einfache Shared Everything Alternative gibt.
 Das gilt auch für viele Index-Strukturen.
 Diese Ergebnisse sind also nur in einem sehr begrenzten Rahmen zu betrachten und sollten nicht weit über die in dieser Arbeit vorgestellte Datenbank ohne weitere Nachforschungen extrapoliert werden.
 
@@ -703,5 +704,3 @@ Für die Replizierbarkeit der Ergebnisse ist es wichtig zu beachten, den Stand d
 #pagebreak()
 
 #bibliography("biblio.yaml", style: "deutsche-sprache")
-
-#pagebreak()
