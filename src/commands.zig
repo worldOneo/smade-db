@@ -30,11 +30,14 @@ const GetCreator = state.Creator(GetMachine, GetMachine, struct {
     }
 }.deinit);
 
-const GetMachine = state.DepMachine(GetState, GetResult, *const map.SmallMap, struct {
+const GetMachine = state.DepMachine(GetState, GetResult, map.ExtendibleMap.ReadArgs, struct {
     const Drive = state.Drive(GetResult);
-    pub fn drive(s: *GetState, dep: *const map.SmallMap) Drive {
-        var maybe_val = dep.get(s.hash, &s.key, s.now);
+    pub fn drive(s: *GetState, dep: map.ExtendibleMap.ReadArgs) Drive {
+        var maybe_val = dep.smallmap.get(s.hash, &s.key, s.now);
         if (maybe_val) |val| {
+            if (!dep.validator.validate()) {
+                return Drive{ .Complete = null };
+            }
             if (val.asConstString()) |str| {
                 const clone = str.clone(s.allocator) orelse return Drive{ .Complete = error.OutOfMemory };
                 s.read = clone;

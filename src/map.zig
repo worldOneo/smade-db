@@ -308,11 +308,11 @@ fn Bucket() type {
             return @intCast(idx);
         }
 
-        fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?*const Value {
+        fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?Value {
             const maybe_idx = this.findIdxOf(hash, key);
             if (maybe_idx) |idx| {
                 if (this.expiry[idx] == 0 or this.expiry[idx] > now) {
-                    return &this.entries[idx].value;
+                    return this.entries[idx].value;
                 }
             }
             return null;
@@ -457,7 +457,7 @@ pub const SmallMap = struct {
         return bucket.updateOrCreate(shifted_hash, key, now, allocator);
     }
 
-    pub fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?*const Value {
+    pub fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?Value {
         const shifted_hash = hash >> this.level;
         const bucket_index = bucketIndex(shifted_hash);
         const bucket = &this.entries[bucket_index];
@@ -736,6 +736,20 @@ pub const ExtendibleMap = struct {
         };
     }
 
+    pub const ReadValidator = struct {
+        read: lock.QueueLock(SmallMap).Read,
+        lock: *lock.QueueLock(SmallMap),
+
+        pub fn validate(self: *const ReadValidator) bool {
+            return self.lock.verifyRead(self.read);
+        }
+    };
+
+    pub const ReadArgs = struct {
+        validator: ReadValidator,
+        smallmap: *const SmallMap,
+    };
+
     pub fn ReadMachine(comptime DepMachine: type, comptime Creator: type, comptime Result: type) type {
         const State = ReadState(DepMachine, Creator);
         return state.Machine(State, Result, struct {
@@ -785,7 +799,10 @@ pub const ExtendibleMap = struct {
                         return .Incomplete;
                     },
                     .Driving => |*driving| {
-                        if (driving.machine.step_drive(driving.read.data)) |result| {
+                        if (driving.machine.step_drive(ReadArgs{ .validator = ReadValidator{
+                            .lock = driving.lock,
+                            .read = driving.read,
+                        }, .smallmap = driving.read.data })) |result| {
                             if (driving.lock.verifyRead(driving.read)) {
                                 driving.machine.deinit();
                                 return Drive{ .Complete = result };
