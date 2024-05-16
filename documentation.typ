@@ -219,9 +219,7 @@ Die I/O Threads selber führen die Anfragen auf der Datenbank aus und kommunizie
 
 Vielschrittige Transaktionen sind Datenbankanfragen, die aus mehreren einzelnen Operationen bestehen, die alle zusammen atomar ausgeführt werden müssen.
 
-/*
 Auch wenn Redis selber keine Rollbacks unterstützt @redis-transactions, die Transaktion in Redis also teilweise ausgeführt werden kann, erachte ich es für sinnvoller, Rollbacks zu unterstützen.
-*/
 
 Vielschrittige Transaktion sind daher interessant, da sie erheblich mehr Koordination erfordern, als einzelne Anfragen.
 Ich vermute, dass diese Koordination bei einem hohen Kommunikations-Overhead die Effizienz der Datenbank erheblich senkt.
@@ -236,6 +234,9 @@ Ich erhoffe mir, dass in einer Shared Everything Architektur der Kommunikations-
 
 Um die Fragen zu beantworten, habe ich eine Datenbank implementiert, die in ihrer Funktionalität vergleichbar ist, mit den existierenden Datenbanken Redis @redis und der Alternativimplementation Dragonfly @df.
 Redis dient hierbei als Vergleich für eine Architektur mit nur einem Kern und Dragonfly für eine Shared Nothing Architektur, die mit mehreren Kernen skalieren kann.
+
+Wichtig bei Redis ist anzuerkennen, dass Redis zwar als Cluster über mehrere Instanzen skalieren kann @redis-cluster, Transaktionen aber nicht auf unterschiedliche Instanzen im Cluster zugreifen können @redis-cluster-multikey.
+Da skalierbare Transaktionen mir in dieser Arbeit aber wichtig sind, wird Redis nur als einzelne Instanz betrachtet. 
 
 Bei diesen Datenbanken handelt es sich um Key-Value-Datenbanken @redis-kv, die sich aufgrund ihrer Einheitlichkeit gut für einen Vergleich eignen.
 Eine Key-Value-Datenbank kann vereinfacht als eine Hashmap über das Netzwerk beschrieben werden.
@@ -503,10 +504,7 @@ Nachdem ein Thread an der Reihe war verlässt dieser die Schlange und veringert 
 #algo({
     import algorithmic: *
     Function("QueueLock-Unlock", args: ("lock",), {
-      Assign([old], FnI[Atomic IncrL32+DecH32][lock])
-      If(cond: "old.l32 > ROLLOVER", {
-        FnI[AtomicDecr][lock, ROLLOVER]
-      })
+      FnI[Atomic IncrL32+DecH32][lock]
     })
 }, caption: [QueueLock-Unlock]) <algo-queue-unlock>
 
@@ -591,10 +589,10 @@ Ich habe mich für 8 verschiedene Workloads entschieden, die ein breites Spektru
 
 = Ergebnisse <ch-ergebnisse>
 
-Die Tests wurden auf AWS Ubuntu Intel x64 Instanzen mit 32 Kernen und 64 virtuellen Kernen durchgeführt (siehe auch  @ch-messen).
+Die Tests wurden auf AWS Ubuntu Intel x64 "c7i.16xlarge" Instanzen mit 32 Kernen und 64 virtuellen Kernen durchgeführt (siehe auch  @ch-messen).
 Für eine hohe Vergleichbarkeit wurden alle Tests und alle Datenbanken auf derselben AWS-Instanz getestet, um Probleme wie Temperaturschwankungen, golden Samples oder Noisy-Neighbours zu vermeiden.
-Zudem wurde jeder Test einmal durchgeführt, wenn die Datenbank festgelegte Threads hatte und einmal ohne.
-Das heißt "Affinity" und ist in den Ergebnissen mit "aff" gekenzeichnet.
+Zudem wurde jeder Test einmal durchgeführt, wenn die Datenbank Threads auf bestimmte Hardware-Threads festgelegt wruden, und einmal ohne diese Einstellung.
+Das Festlegen der Hardware-Threads heißt "Affinity" und ist in den Ergebnissen mit "aff" gekenzeichnet.
 
 == Lese-dominierte Workloads
 
@@ -664,6 +662,36 @@ Auch in der Latenz in @abb-latency-m wird ein Performanceeinbruch von Dragonfly 
 
 Die Latenz von Smade bleibt vergleichbar mit den nicht atomaren Anfragen und die Latenz von Redis sinkt, aber die Latenz von Dragonfly übertrifft die von Redis bei den hohen Perzentilen und ist auch im Durchschnitt höher als im anderen Test. 
 
+== Ergebnisse auf AMD-Hardware
+
+Im Kontrast zu den monolithischen Chips, die Intel für Server verwendet, sind aktuelle AMD-Chips auf einem Chiplett-Design aufgebaut.
+So werden auf einem Substrat mehrere "CCDs" (Compute Complex Dies) und ein "IOD" (Input/Output Die) platziert, um als eine Server-CPU zu agieren @amd-genoa.
+Dies wird in @abb-amd-genoa (die aus dem Whitepaper von AMD kommt) schematisch aufgezeigt.
+
+#figure(image("./assets/amd-genoa-schema.png"), caption: [Schematische Abbildung von AMD "Genoa" Server CPUs]) <abb-amd-genoa>
+
+Die Kommunikation zwischen einzelnen CCDs ist dabei deutlich langsamer als die auf einem einzelnen CCD und auch etwas langsamer als die Kommunikation auf einem monolithischen Chip.
+Das führt dazu, dass am Ende zwar ähnliche Ergebnisse erzielt werden, die Skalierung mit einer unterschiedlichen Anzahl an Kernen allerdings längst nicht so regelmäßig verläuft.
+
+In @abb-amd-ms5t ist dies dargestellt, anhand des transaktionalen Workloads mit 5 Operationen pro Transaktion.
+Besonders ist dabei auf die Anzahl der Kerne zu achten und den Unterschied zwischen Konfigurationen mit Affinität und ohne.
+
+#figure(image("./assets/amd-charts/MULTI SET 5 R Throughput.png"), caption: [Durchsatzleistung (AMD): Transaktion mit 5x Write, zufällige Schlüssel]) <abb-amd-ms5t>
+
+Was besonders auffällt ist, dass die Performance von "Dragonfly" nach 8 Kernen etwas abnimmt und "Smade" bei einer Erhöhung von 2 auf 4 Kernen keine Performance gewinnt.
+Allerdings gewinnen "Dragonfly aff" und "Smade aff" stetig an Performance, aber sind mit weniger Kernen langsamer.
+
+Das liegt daran, dass die Prozesse ohne Affinität für einen bestimmten Hardware-Thread bei wenigen Threads auf ähnliche CCDs wie der Loader verschoben werden.
+Dadurch erfahren die da eine geringere Latenz.
+Wenn diese CCDs allerdings maximal ausgelastet sind, müssen einige Threads auf neue CCDs verschoben werden, was die Latenz erhöht.
+Wie zu erkennen ist, ist "Dragonfly" so sensitiv gegenüber dieser Veränderung der Latenz, dass die Performance bei 8 Threads erst wieder mit 16 Threads eingeholt werden kann.
+
+Bei "Smade" ist der Unterschied auch merkbar, aber der Performanceeinbruch längst nicht so stark.
+Bei 4 Threads ist ein kleines Performancedefizit zu erkennen, allerdings wird das bereits bei 6 Threads wieder deutlich eingeholt.
+
+Wichtig ist hierbei auch zu erkennen, dass es bei "Smade" mit mehr als 2 Threads keinen Unterschied macht, ob die Threads eine Affinität haben oder nicht.
+Bei "Dragonfly" hingegen ist die Konfiguration mit Affinität deutlich langsamer als die ohne Affinität.
+
 = Ergebnissdiskussion
 
 Nach dem Betrachten der Ergebnisse scheint es so, als wäre eine Shared Everything Architektur in bestimmten Anwendungsfällen den gängigen Alternativen überlegen.
@@ -680,7 +708,7 @@ Diese Ergebnisse sind also nur in einem sehr begrenzten Rahmen zu betrachten und
 
 Auch wenn ich mir meiner Messmethodik recht sicher bin, ist der Umfang der erhobenen Daten kaum ausreichend, um die vielen Faceten der Performance zu erfassen.
 Während beispielsweise die Ergebnisse, wie ich sie hier gezeigt habe, in mehreren Durchläufen relativ wiederholbar waren, wurden alle nur in einem sehr spezifischen Szenario erhoben.
-So stellt sich die Frage, ob die Ergebnisse zur gleichen Aussage kämen, wenn die Datenbank auf AMD Hardware oder ARM IP getestet werden würde oder wie sich die Datenbank verhält, wenn die Anzahl an Datenbankclients verändert wird. 
+So stellt sich die Frage, ob die Ergebnisse zur gleichen Aussage kämen, wenn die Datenbank beispielsweise auf ARM IP getestet werden würde oder wie sich die Datenbank verhält, wenn die Anzahl an Datenbankclients verändert wird. 
 
 Auch gibt es in der Datenbank noch einige Probleme, die noch nicht vollständig behoben oder durchdrungen wurden, wie die angesprochene Latenzspitze oder einige Probleme der Speicherverwaltung unter anderem, dass in bestimmten Szenarien scheinbar Speicher nicht recycelt wird.
 Hierbei stellt sich die Frage, ob und zu welchen Maß diese Probleme die Performance der Architektur beinflussen.

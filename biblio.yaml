@@ -50,6 +50,18 @@ redis-kv:
   title: What is a Key-Value Database? | Redis
   url: https://redis.com/nosql/key-value-databases/
   date: 2023-06-07
+redis-cluster:
+  type: Web
+  author: Redis
+  title: Redis cluster specification | Docs
+  url: https://redis.io/docs/latest/operate/oss_and_stack/reference/cluster-spec/
+  date: 2024-05-15
+redis-cluster-multikey:
+  type: Web
+  author: Redis
+  title: Scale with Redis Cluster | Docs
+  url: https://redis.io/docs/latest/operate/oss_and_stack/management/scaling/
+  date: 2024-05-15
 memtier:
   type: Web
   title: "memtier_benchmark: A High-Throughput Benchmarking Tool for Redis & Memcached"
@@ -91,3 +103,10 @@ cnc-c2clatency:
   publisher: Chips and Cheese
   date: 2023-10-07
   url: https://chipsandcheese.com/2023/11/07/core-to-core-latency-data-on-large-systems/
+amd-genoa:
+  type: Article
+  title: "4th Gen AMD EPYC Processor Architecture"
+  author: AMD
+  publisher: AMD
+  date: 2023-09
+  url: https://www.amd.com/system/files/documents/4th-gen-epyc-processor-architecture-white-paper.pdf

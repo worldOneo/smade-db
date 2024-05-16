@@ -235,7 +235,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                 s.acquiremachine = null;
                 s.calls = 0;
             }
-            if (s.calls < 128) {
+            if (s.calls < 256) {
                 return drive(s);
             }
             return .Incomplete;

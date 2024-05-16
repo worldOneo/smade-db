@@ -103,7 +103,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                 }
                 s.calls = 0;
             }
-            if (s.calls > 64) {
+            if (s.calls > 128) {
                 return .Incomplete; // thats it, budget well spent
             }
             _ = drive(s);
