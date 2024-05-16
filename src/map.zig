@@ -280,6 +280,22 @@ fn Bucket() type {
             return idxes;
         }
 
+        fn findConcurrentIdxOf(this: *const This, shifted_hash: u64, key: *const string.String, validator: ExtendibleMap.ReadValidator) ?usize {
+            const one: u16 = 1;
+
+            var clz_access = this.metaClzIdxFast(hash_mask | present_mask, @as(u16, @intCast(shifted_hash & @as(u64, @intCast(hash_mask)))) | present_mask);
+            while (clz_access != 0) {
+                const idx: u16 = @clz(clz_access); // get set bit
+                clz_access ^= (one << 15) >> @intCast(idx); // unset bit
+                const str = this.entries[idx].key;
+                if (!validator.validate()) return null;
+                if (str.eql(key)) {
+                    return @intCast(idx);
+                }
+            }
+            return null;
+        }
+
         fn findIdxOf(this: *const This, shifted_hash: u64, key: *const string.String) ?usize {
             const one: u16 = 1;
 
@@ -308,8 +324,8 @@ fn Bucket() type {
             return @intCast(idx);
         }
 
-        fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?Value {
-            const maybe_idx = this.findIdxOf(hash, key);
+        fn get(this: *const This, hash: u64, key: *const string.String, now: u32, validator: ExtendibleMap.ReadValidator) ?Value {
+            const maybe_idx = this.findConcurrentIdxOf(hash, key, validator);
             if (maybe_idx) |idx| {
                 if (this.expiry[idx] == 0 or this.expiry[idx] > now) {
                     return this.entries[idx].value;
@@ -457,11 +473,11 @@ pub const SmallMap = struct {
         return bucket.updateOrCreate(shifted_hash, key, now, allocator);
     }
 
-    pub fn get(this: *const This, hash: u64, key: *const string.String, now: u32) ?Value {
+    pub fn get(this: *const This, hash: u64, key: *const string.String, now: u32, validator: ExtendibleMap.ReadValidator) ?Value {
         const shifted_hash = hash >> this.level;
         const bucket_index = bucketIndex(shifted_hash);
         const bucket = &this.entries[bucket_index];
-        return bucket.get(shifted_hash, key, now);
+        return bucket.get(shifted_hash, key, now, validator);
     }
 
     pub fn delete(this: *This, hash: u64, key: *const string.String, now: u32) ?Deleted {

@@ -33,7 +33,7 @@ const GetCreator = state.Creator(GetMachine, GetMachine, struct {
 const GetMachine = state.DepMachine(GetState, GetResult, map.ExtendibleMap.ReadArgs, struct {
     const Drive = state.Drive(GetResult);
     pub fn drive(s: *GetState, dep: map.ExtendibleMap.ReadArgs) Drive {
-        var maybe_val = dep.smallmap.get(s.hash, &s.key, s.now);
+        var maybe_val = dep.smallmap.get(s.hash, &s.key, s.now, dep.validator);
         if (maybe_val) |val| {
             if (!dep.validator.validate()) {
                 return Drive{ .Complete = null };
