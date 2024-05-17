@@ -671,7 +671,7 @@ Dies wird in @abb-amd-genoa (die aus dem Whitepaper von AMD kommt) schematisch a
 #figure(image("./assets/amd-genoa-schema.png"), caption: [Schematische Abbildung von AMD "Genoa" Server CPUs]) <abb-amd-genoa>
 
 Die Kommunikation zwischen einzelnen CCDs ist dabei deutlich langsamer als die auf einem einzelnen CCD und auch etwas langsamer als die Kommunikation auf einem monolithischen Chip.
-Das führt dazu, dass am Ende zwar ähnliche Ergebnisse erzielt werden, die Skalierung mit einer unterschiedlichen Anzahl an Kernen allerdings längst nicht so regelmäßig verläuft.
+Das führt dazu, dass die Tests zwar ähnliche Ergebnisse erzielen, die Skalierung mit einer unterschiedlichen Anzahl an Kernen allerdings längst nicht so regelmäßig verläuft.
 
 In @abb-amd-ms5t ist dies dargestellt, anhand des transaktionalen Workloads mit 5 Operationen pro Transaktion.
 Besonders ist dabei auf die Anzahl der Kerne zu achten und den Unterschied zwischen Konfigurationen mit Affinität und ohne.
@@ -681,7 +681,7 @@ Besonders ist dabei auf die Anzahl der Kerne zu achten und den Unterschied zwisc
 Was besonders auffällt ist, dass die Performance von "Dragonfly" nach 8 Kernen etwas abnimmt und "Smade" bei einer Erhöhung von 2 auf 4 Kernen keine Performance gewinnt.
 Allerdings gewinnen "Dragonfly aff" und "Smade aff" stetig an Performance, aber sind mit weniger Kernen langsamer.
 
-Das liegt daran, dass die Prozesse ohne Affinität für einen bestimmten Hardware-Thread bei wenigen Threads auf ähnliche CCDs wie der Loader verschoben werden.
+Das liegt daran, dass die Prozesse ohne Affinität für einen bestimmten Hardware-Thread bei wenigen Threads auf ähnliche CCDs wie der Loader verschoben werden und näher bei einander laufen können.
 Dadurch erfahren die da eine geringere Latenz.
 Wenn diese CCDs allerdings maximal ausgelastet sind, müssen einige Threads auf neue CCDs verschoben werden, was die Latenz erhöht.
 Wie zu erkennen ist, ist "Dragonfly" so sensitiv gegenüber dieser Veränderung der Latenz, dass die Performance bei 8 Threads erst wieder mit 16 Threads eingeholt werden kann.
@@ -690,7 +690,7 @@ Bei "Smade" ist der Unterschied auch merkbar, aber der Performanceeinbruch läng
 Bei 4 Threads ist ein kleines Performancedefizit zu erkennen, allerdings wird das bereits bei 6 Threads wieder deutlich eingeholt.
 
 Wichtig ist hierbei auch zu erkennen, dass es bei "Smade" mit mehr als 2 Threads keinen Unterschied macht, ob die Threads eine Affinität haben oder nicht.
-Bei "Dragonfly" hingegen ist die Konfiguration mit Affinität deutlich langsamer als die ohne Affinität.
+Bei "Dragonfly" hingegen ist die Konfiguration mit Affinität deutlich langsamer als die ohne Affinität, was wieder für eine sehr hohe Latenzsensitivität sprechen könnte.
 
 = Ergebnissdiskussion
 
@@ -720,12 +720,11 @@ Die Datenbank sollte außerdem in einen Zustand gebracht werden, in dem sie als 
 
 Es ist nicht so lange her, dass "Performance Engineering" daraus bestand, die Hardware auf dem neusten Stand zu halten.
 Heutzutage wird es allerdings immer schwerer, sich auf ständige verbesserung der Leistung von Prozessoren zu verlassen, um den steigenden Leistungsanforderungen der digitalisierten Welt gerecht zu werden.
-Die in dieser Arbeit vorgeschlagene Architektur für In-Memory-Datenbanken bietet möglicherweise einen Ansatz für das Entwickeln von Systemen, die bei gleichbleibender Hardware effizienter arbeiten können als bisherige.
+Die in dieser Arbeit untersuchte Shared Nothing Architektur für In-Memory-Datenbanken bietet möglicherweise einen Ansatz für das Entwickeln von Systemen, die bei gleichbleibender Hardware effizienter arbeiten können als bisherige.
 
 = Quellcodeverweis
 
 Der gesamte Code, alle Grafiken, Benchmarkergebnisse und Scripts des Projekts können auf #link("https://github.com/worldOneo/smade-db")[GitHub] #footnote[https://github.com/worldOneo/smade-db] eingesehen werden.
-Für die Replizierbarkeit der Ergebnisse ist es wichtig zu beachten, den Stand des Quellcodes zum Zeitpunkt der Tests zu betrachten, da die Datenbank nach den Tests weiterentwickelt wurde.
 
 // #figure( image("./benchmark-results/round-3-intel-full-atillery/Limits of memtier.png"), caption: [Memtier performance Problem]) <fig-memtier-performance-limit>
 
