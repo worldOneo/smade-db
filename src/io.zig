@@ -54,7 +54,7 @@ pub const Buffer = struct {
                 this.data[start] = this.data[i];
                 start += 1;
             }
-            var read = this.read;
+            const read = this.read;
             this.read = 0;
             this.written -= read;
         }
@@ -267,7 +267,7 @@ pub const IOServer = struct {
     contextpool: ContextPool,
     serverfd: i32,
     serveraddr: linux.sockaddr.in,
-    uring: linux.IO_Uring,
+    uring: linux.IoUring,
     accepting: bool,
     bound: bool,
 
@@ -277,7 +277,7 @@ pub const IOServer = struct {
         var server: IOServer = undefined;
         server.bound = false;
 
-        server.uring = try linux.IO_Uring.init(queue_depth, 0);
+        server.uring = try linux.IoUring.init(queue_depth, 0);
         server.contextpool = pool;
         return server;
     }
@@ -333,7 +333,7 @@ pub const IOServer = struct {
         _ = try this.uring.recv(
             (IORequest{ .contextid = ctx.poolid, .requesttype = .Read }).toInt(),
             ctx.client_fd,
-            linux.IO_Uring.RecvBuffer{ .buffer = ctx.recvbuffer.freeSpace() },
+            linux.IoUring.RecvBuffer{ .buffer = ctx.recvbuffer.freeSpace() },
             0,
         );
     }
@@ -398,8 +398,8 @@ pub const IOServer = struct {
 
     pub fn connect(this: *This, userdata: u64, port: u16) !void {
         var context = this.contextpool.get() orelse return error.OutOfContexts;
-        var size: u32 = @sizeOf(linux.sockaddr);
-        var fd = sysint(linux.socket(linux.PF.INET, linux.SOCK.STREAM, linux.IPPROTO.TCP));
+        const size: u32 = @sizeOf(linux.sockaddr);
+        const fd = sysint(linux.socket(linux.PF.INET, linux.SOCK.STREAM, linux.IPPROTO.TCP));
         if (fd == -1) {
             return error.SocketSetup;
         }
@@ -429,7 +429,7 @@ pub const IOServer = struct {
 pub fn htons(port: u16) u16 {
     var p = port;
     var bytes: [*]u8 = @ptrCast(&p);
-    var tmp = bytes[0];
+    const tmp = bytes[0];
     bytes[0] = bytes[1];
     bytes[1] = tmp;
     return @as(*u16, @alignCast(@ptrCast(bytes))).*;

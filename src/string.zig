@@ -104,12 +104,12 @@ pub const String = struct {
     }
 
     fn isSmall(this: *const This) bool {
-        var sms: *const SmallString = @ptrCast(this);
+        const sms: *const SmallString = @ptrCast(this);
         return sms.data[23] & 1 == 1;
     }
 
     fn smallSize(this: *const This) usize {
-        var sms: *const SmallString = @ptrCast(this);
+        const sms: *const SmallString = @ptrCast(this);
         return @intCast(sms.data[23] >> 2); // 2 is for user map value
     }
 
@@ -128,7 +128,7 @@ pub const String = struct {
             @memcpy(new[0..length], sms.data[0..length]);
             @memcpy(new[length..(length + data.len)], data);
             const largeString = LargeString{ .length = length + data.len, .capacity = new.len, .data = @ptrCast(new) };
-            var thisLarge: *LargeString = @ptrCast(this);
+            const thisLarge: *LargeString = @ptrCast(this);
             thisLarge.* = largeString;
             return {};
         }
@@ -190,7 +190,7 @@ pub const String = struct {
     pub fn toInt(this: *const This) ?i64 {
         var base: i64 = 0;
         var sign: i64 = 1;
-        var slice = this.sliceView();
+        const slice = this.sliceView();
         var ptr: usize = 0;
         if (slice.len == 0) return null;
         if (slice[0] == '-') {

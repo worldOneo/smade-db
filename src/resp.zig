@@ -159,7 +159,7 @@ pub const RespValue = struct {
         if (@TypeOf(value) == void) {
             return .{ .flag = .Null, .data = [_]u8{0} ** 24 };
         }
-        var inner: [24]u8 = @as(*const [24]u8, @ptrCast(&value)).*;
+        const inner: [24]u8 = @as(*const [24]u8, @ptrCast(&value)).*;
         switch (@TypeOf(value)) {
             RespList => return .{ .flag = .List, .data = inner },
             RespMap => return .{ .flag = .Map, .data = inner },
@@ -284,7 +284,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
             const ulength: usize = @intCast(length);
             var list = RespList.init(ulength, la) orelse return error.OutOfMemory;
             for (0..ulength) |i| {
-                var parsed = try parseResp(resp, pos, la) orelse {
+                const parsed = try parseResp(resp, pos, la) orelse {
                     list.deinit(la);
                     return null;
                 };
@@ -313,7 +313,7 @@ pub fn parseResp(resp: []const u8, offset: usize, la: *alloc.LocalAllocator) !?P
                 pos = key.read_until + 1;
 
                 if (key.value.asString()) |str_key| {
-                    var value = try parseResp(resp, pos, la) orelse {
+                    const value = try parseResp(resp, pos, la) orelse {
                         map.deinit(la);
                         return null;
                     };

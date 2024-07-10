@@ -3,7 +3,7 @@ const std = @import("std");
 pub fn QueueLock(comptime T: type) type {
     return struct {
         const This = @This();
-        const Version = std.atomic.Atomic(u64);
+        const Version = std.atomic.Value(u64);
         version: Version,
         value: T,
         pub fn init(value: T) This {
@@ -31,13 +31,13 @@ pub fn QueueLock(comptime T: type) type {
         }
 
         pub fn queue(this: *This) ?u32 {
-            const ver = this.version.fetchAdd(queueOne, std.atomic.Ordering.Monotonic);
+            const ver = this.version.fetchAdd(queueOne, .monotonic);
             const splitver = split(ver);
             if (splitver.queue == 0) {
                 if (splitver.version > 1_000_000_000) {
-                    _ = this.version.fetchSub(999_999_999, std.atomic.Ordering.Acquire);
+                    _ = this.version.fetchSub(999_999_999, .acquire);
                 } else {
-                    _ = this.version.fetchAdd(1, std.atomic.Ordering.Acquire);
+                    _ = this.version.fetchAdd(1, .acquire);
                 }
                 return null;
             }
@@ -48,15 +48,15 @@ pub fn QueueLock(comptime T: type) type {
         }
 
         pub fn unlock(this: *This) void {
-            const prev = this.version.fetchAdd(dequeUnlock, std.atomic.Ordering.Release);
+            const prev = this.version.fetchAdd(dequeUnlock, .release);
             if (prev % 2 == 0) unreachable("Unlocked unlocked value");
         }
 
         pub fn tryDeque(this: *This, queue_entry: u32) bool {
-            const ver = this.version.load(std.atomic.Ordering.Monotonic);
+            const ver = this.version.load(.monotonic);
             const splitver = split(ver);
             if (splitver.version == queue_entry) {
-                _ = this.version.fetchAdd(1, std.atomic.Ordering.Acquire);
+                _ = this.version.fetchAdd(1, .acquire);
                 return true;
             }
             return false;
@@ -65,14 +65,14 @@ pub fn QueueLock(comptime T: type) type {
         pub const Read = struct { version: u64, data: *const T };
 
         pub fn startRead(this: *This) ?Read {
-            const ver = this.version.load(std.atomic.Ordering.Acquire);
+            const ver = this.version.load(.acquire);
             if (ver & 1 == 1) {
                 return null;
             }
             return Read{ .version = ver, .data = &this.value };
         }
         pub fn verifyRead(this: *This, old_read: Read) bool {
-            const ver = this.version.load(std.atomic.Ordering.Acquire);
+            const ver = this.version.load(.acquire);
             return ver & versionBits == old_read.version & versionBits;
         }
     };
@@ -81,40 +81,40 @@ pub fn QueueLock(comptime T: type) type {
 pub fn OptLock(comptime T: type) type {
     return struct {
         const This = @This();
-        const Version = std.atomic.Atomic(u64);
+        const Version = std.atomic.Value(u64);
         version: Version,
         value: T,
         pub fn init(value: T) This {
             return This{ .value = value, .version = Version.init(0) };
         }
         pub fn tryLock(this: *This) ?*T {
-            const ver = this.version.load(std.atomic.Ordering.Acquire);
+            const ver = this.version.load(.acquire);
 
             if (ver & 1 == 1) {
                 return null;
             }
-            if (this.version.tryCompareAndSwap(ver, ver + 1, std.atomic.Ordering.Monotonic, std.atomic.Ordering.Monotonic) != null) {
+            if (this.version.cmpxchgWeak(ver, ver + 1, .monotonic, .monotonic) != null) {
                 return null;
             }
             return &this.value;
         }
 
         pub fn unlock(this: *This) void {
-            const prev = this.version.fetchAdd(1, std.atomic.Ordering.Release);
+            const prev = this.version.fetchAdd(1, .release);
             if (prev % 2 == 0) unreachable("Unlocked unlocked value");
         }
 
         pub const Read = struct { version: u64, data: *const T };
 
         pub fn startRead(this: *This) ?Read {
-            const ver = this.version.load(std.atomic.Ordering.Acquire);
+            const ver = this.version.load(.acquire);
             if (ver & 1 == 1) {
                 return null;
             }
             return Read{ .version = ver, .data = &this.value };
         }
         pub fn verifyRead(this: *This, old_read: Read) bool {
-            const ver = this.version.load(std.atomic.Ordering.Acquire);
+            const ver = this.version.load(.acquire);
             return ver == old_read.version;
         }
     };

@@ -28,37 +28,37 @@ fn countLines(data: []u8) u32 {
     return c;
 }
 
-fn worker(worker_id: usize, config: Config, signal: *std.atomic.Atomic(u32), report: ReportSlice) void {
+fn worker(worker_id: usize, config: Config, signal: *std.atomic.Value(u32), report: ReportSlice) void {
     // setaffinity(worker_id, config.affinity_spacing) catch {
     //     std.debug.print("Couldn't set affinity\n", .{});
-    //     std.os.exit(0);
+    //     std.process.exit(0);
     // };
 
-    var ctxpool = io.ContextPool.createPool(
+    const ctxpool = io.ContextPool.createPool(
         config.connections,
         config.recv_buffer_size,
         config.send_buffer_size,
         std.heap.page_allocator,
     ) catch |err| {
         std.debug.print("#{} failed to allocate IO Context pool: {s}\n", .{ worker_id, @errorName(err) });
-        std.os.exit(0);
+        std.os.E(0);
     };
     var ring: io.IOServer = io.IOServer.init(ctxpool, @intCast(config.queue_depth)) catch |err| {
         std.debug.print("#{} failed to setup IO Uring: {s}\n", .{ worker_id, @errorName(err) });
-        std.os.exit(0);
+        std.process.exit(0);
     };
     var rnd = std.rand.DefaultPrng.init(@bitCast(std.time.milliTimestamp()));
     for (0..config.connections) |_| {
         ring.connect(0, @intCast(config.port)) catch |err| {
             std.debug.print("#{} failed to prepare open connection: {s}\n", .{ worker_id, @errorName(err) });
-            std.os.exit(0);
+            std.process.exit(0);
         };
     }
     var count: u32 = 0;
-    var cansleep = true;
+    const cansleep = true;
     const start: u64 = @intCast(std.time.microTimestamp());
     while (true) {
-        var status = signal.load(std.atomic.Ordering.Monotonic);
+        const status = signal.load(.monotonic);
         if (status == 2) {
             report[999_999] = count;
             return;
@@ -66,25 +66,25 @@ fn worker(worker_id: usize, config: Config, signal: *std.atomic.Atomic(u32), rep
 
         var iterator = ring.work(cansleep) catch |err| {
             std.debug.print("#{} failed to drive I/O: {s}\n", .{ worker_id, @errorName(err) });
-            std.os.exit(0);
+            std.process.exit(0);
         };
         var now: u64 = @intCast(std.time.microTimestamp());
         now -= start;
 
         while (iterator.next() catch |err| {
             std.debug.print("#{} IO Error: {s}\n", .{ worker_id, @errorName(err) });
-            std.os.exit(0);
+            std.process.exit(0);
         }) |item| {
             if (item.lastevent == io.IOEvent.Open) {
-                var lines = sendPayload(item, config.payload, config.dbtype, &rnd);
+                const lines = sendPayload(item, config.payload, config.dbtype, &rnd);
                 item.userdata = now + (lines << 32);
                 ring.send(item) catch |err| {
                     std.debug.print("#{} failed to send I/O: {s}\n", .{ worker_id, @errorName(err) });
-                    std.os.exit(0);
+                    std.process.exit(0);
                 };
                 ring.recv(item) catch |err| {
                     std.debug.print("#{} failed to schedule read I/O: {s}\n", .{ worker_id, @errorName(err) });
-                    std.os.exit(0);
+                    std.process.exit(0);
                 };
             } else if (item.lastevent == io.IOEvent.Data) {
                 if (countLines(item.recvbuffer.dataReady()) >= item.userdata >> 32) {
@@ -97,26 +97,26 @@ fn worker(worker_id: usize, config: Config, signal: *std.atomic.Atomic(u32), rep
                     if (item.is_sending) {
                         item.userdata = 0;
                     } else {
-                        var lines = sendPayload(item, config.payload, config.dbtype, &rnd);
+                        const lines = sendPayload(item, config.payload, config.dbtype, &rnd);
                         item.userdata = now + (lines << 32);
                         ring.send(item) catch |err| {
                             std.debug.print("#{} failed to send I/O: {s}\n", .{ worker_id, @errorName(err) });
-                            std.os.exit(0);
+                            std.process.exit(0);
                         };
                     }
                 }
             } else if (item.lastevent == io.IOEvent.Write) {
                 if (item.userdata == 0) {
-                    var lines = sendPayload(item, config.payload, config.dbtype, &rnd);
+                    const lines = sendPayload(item, config.payload, config.dbtype, &rnd);
                     item.userdata = now + (lines << 32);
                     ring.send(item) catch |err| {
                         std.debug.print("#{} failed to send I/O: {s}\n", .{ worker_id, @errorName(err) });
-                        std.os.exit(0);
+                        std.process.exit(0);
                     };
                 }
             } else if (item.lastevent == io.IOEvent.Lost) {
                 std.debug.print("#{} Connection dropped\n", .{worker_id});
-                std.os.exit(0);
+                std.process.exit(0);
             } else {
                 std.debug.print("Unhandled status: {}\n", .{item.lastevent});
             }
@@ -130,7 +130,7 @@ fn normal(rnd: *std.rand.Random) i64 {
 
 fn sendPayload(ctx: *io.ConnectionContext, payload_type: usize, dbtype: usize, rnd: *std.rand.DefaultPrng) u64 {
     var srand = rnd.random();
-    var r = &srand;
+    const r = &srand;
     if (payload_type == 0) {
         //SET
         for (0..8) |_| {
@@ -260,7 +260,7 @@ fn sendPayload(ctx: *io.ConnectionContext, payload_type: usize, dbtype: usize, r
         }
     }
     std.debug.print("Invalid payload\n", .{});
-    std.os.exit(1);
+    std.process.exit(1);
 }
 
 fn seql(a: []const u8, b: []const u8) bool {
@@ -320,20 +320,20 @@ pub fn main() !void {
     var threads: [64]std.Thread = undefined; // who cares
     var recv: []u32 = std.heap.page_allocator.alloc(u32, 64 * 1_000_000) catch unreachable;
     @memset(recv, 0);
-    var status = std.atomic.Atomic(u32).init(0);
+    var status = std.atomic.Value(u32).init(0);
     for (0..config.thread_count) |thread_num| {
         std.debug.print("Spawning thread nr. {}\n", .{thread_num});
         threads[thread_num] = std.Thread.spawn(.{}, worker, .{ thread_num, config, &status, recv[thread_num * 1_000_000 .. (thread_num + 1) * 1_000_000] }) catch |err| {
             std.debug.print("Failed to spawn thread: {s}\n", .{@errorName(err)});
-            std.os.exit(1);
+            std.process.exit(1);
         };
     }
 
     std.time.sleep(2 * std.time.ns_per_s);
-    _ = status.fetchAdd(1, std.atomic.Ordering.Monotonic);
+    _ = status.fetchAdd(1, .monotonic);
     std.debug.print("Starting measuring...\n", .{});
     std.time.sleep(load_seconds * std.time.ns_per_s);
-    _ = status.fetchAdd(1, std.atomic.Ordering.Monotonic);
+    _ = status.fetchAdd(1, .monotonic);
     std.debug.print("Collecting data...\n", .{});
     for (0..config.thread_count) |thread_num| {
         threads[thread_num].join();
@@ -351,9 +351,9 @@ pub fn main() !void {
 
     std.io.getStdOut().writer().print("Req/Sec: {} [{} / 20s]\n", .{ reqs / load_seconds, reqs }) catch unreachable;
 
-    var freqs: f64 = @floatFromInt(reqs);
-    var prints: [9]f64 = [9]f64{ freqs * 0.5, freqs * 0.80, freqs * 0.90, freqs * 0.99, freqs * 0.999, freqs * 0.9999, freqs * 0.99995, freqs * 0.99999, freqs };
-    var texts: [9][]const u8 = [_][]const u8{ "p50", "p80", "p90", "p99", "p99.9", "p99.99", "p99.995", "p99.999", "p100" };
+    const freqs: f64 = @floatFromInt(reqs);
+    const prints: [9]f64 = [9]f64{ freqs * 0.5, freqs * 0.80, freqs * 0.90, freqs * 0.99, freqs * 0.999, freqs * 0.9999, freqs * 0.99995, freqs * 0.99999, freqs };
+    const texts: [9][]const u8 = [_][]const u8{ "p50", "p80", "p90", "p99", "p99.9", "p99.99", "p99.995", "p99.999", "p100" };
     var count: usize = 0;
     var ripidx: usize = 0;
     std.io.getStdOut().writer().print("Avg: {}\n", .{latency_sum / reqs}) catch unreachable;

@@ -33,7 +33,7 @@ const GetCreator = state.Creator(GetMachine, GetMachine, struct {
 const GetMachine = state.DepMachine(GetState, GetResult, map.ExtendibleMap.ReadArgs, struct {
     const Drive = state.Drive(GetResult);
     pub fn drive(s: *GetState, dep: map.ExtendibleMap.ReadArgs) Drive {
-        var maybe_val = dep.smallmap.get(s.hash, &s.key, s.now, dep.validator);
+        const maybe_val = dep.smallmap.get(s.hash, &s.key, s.now, dep.validator);
         if (maybe_val) |val| {
             if (!dep.validator.validate()) {
                 return Drive{ .Complete = null };
@@ -70,7 +70,7 @@ const SetMachine = state.Machine(SetState, SetResult, struct {
         if (s.ins_spl_machine.drive()) |maybe_value| {
             if (maybe_value) |c_value| {
                 var value: map.InsertAndSplitResult = c_value;
-                var old = value.value.*;
+                const old = value.value.*;
                 value.value.* = s.value;
                 value.expires.* = s.expire;
                 value.acquired.lock.unlock();
@@ -205,7 +205,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
                     const shash = str.hash();
                     var small_map = s.data.multi_get_map(shash);
                     if (v.value.asString()) |str_val| {
-                        var res = small_map.updateOrCreate(shash, str.*, s.now, s.allocator);
+                        const res = small_map.updateOrCreate(shash, str.*, s.now, s.allocator);
                         switch (res) {
                             map.SmallMap.Result.Present => |val| {
                                 val.value.deinit(s.allocator);
@@ -270,7 +270,7 @@ pub const MultiMachine = state.Machine(MultiState, bool, struct {
             //
             // It is not about what is done, but what could be done...
             if (std.mem.eql(u8, execute.sliceView(), "SET") or std.mem.eql(u8, execute.sliceView(), "SETEX")) {
-                var res = small_map.updateOrCreate(shash, str.*, 0, s.allocator);
+                const res = small_map.updateOrCreate(shash, str.*, 0, s.allocator);
                 var expires: u32 = 0;
                 var val_idx: usize = 2;
                 if (std.mem.eql(u8, execute.sliceView(), "SETEX")) {
@@ -430,7 +430,7 @@ pub const CommandMachine = state.Machine(CommandState, CommandResult, struct {
             CommandState.Get => |*get_machine| {
                 if (get_machine.drive()) |res| {
                     get_machine.deinit();
-                    var res_val = res catch |err| return Drive{ .Complete = err };
+                    const res_val = res catch |err| return Drive{ .Complete = err };
                     if (res_val) |val| {
                         return Drive{ .Complete = .{ .executed = .Get, .value = map.Value.fromString(val) } };
                     }
@@ -461,10 +461,10 @@ test "commands" {
     try data.setup(1, arena.allocator(), &la);
 
     var respValueGet = (try resp.parseResp("*2\r\n+GET\r\n+key\r\n", 0, &la)).?;
-    var listGet = respValueGet.value.asList().?;
+    const listGet = respValueGet.value.asList().?;
 
     var respValueSet = (try resp.parseResp("*3\r\n+SET\r\n+key\r\n+value\r\n", 0, &la)).?;
-    var listSet = respValueSet.value.asList().?;
+    const listSet = respValueSet.value.asList().?;
 
     const commandGet = try CommandState.init(&data, listGet, &la);
     const commandSet = try CommandState.init(&data, listSet, &la);
@@ -501,13 +501,13 @@ test "commands.Multi" {
     try data.setup(1, arena.allocator(), &la);
 
     var respValueSet1 = (try resp.parseResp("*3\r\n+SET\r\n+key1\r\n+value1\r\n", 0, &la)).?;
-    var listSet1 = respValueSet1.value.asList().?.*;
+    const listSet1 = respValueSet1.value.asList().?.*;
 
     var respValueSet = (try resp.parseResp("*3\r\n+SET\r\n+key\r\n+value\r\n", 0, &la)).?;
-    var listSet = respValueSet.value.asList().?.*;
+    const listSet = respValueSet.value.asList().?.*;
 
     var respValueExec = (try resp.parseResp("*1\r\n+EXEC\r\n", 0, &la)).?;
-    var listExec = respValueExec.value.asList().?.*;
+    const listExec = respValueExec.value.asList().?.*;
 
     var multi = MultiState.init(&la, &data);
     try expect(!try multi.addCommand(listSet1));

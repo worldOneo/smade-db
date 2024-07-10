@@ -49,7 +49,7 @@ const Page = struct {
     size_class: ?*SizeClass,
 
     // Cacheline 2
-    thread_free: std.atomic.Atomic(?*align(1) Block),
+    thread_free: std.atomic.Value(?*align(1) Block),
     _block2: CachelineBlocker(56), // prevent false sharing
 
     data: [pageSizeInBlocks]Block,
@@ -69,7 +69,7 @@ const Page = struct {
             .size_class = null,
 
             // CL 2
-            .thread_free = std.atomic.Atomic(?*align(1) Block).init(null),
+            .thread_free = std.atomic.Value(?*align(1) Block).init(null),
             ._block2 = CachelineBlocker(56).init(),
 
             // Data
@@ -98,7 +98,7 @@ const Page = struct {
         }
         if (this.bump_idx + size <= bytesInPage) {
             allocLog("thread {} allocating size {} ({s}) for page {*} from bump: {}\n", .{ std.Thread.getCurrentId(), size, @typeName(T), this, @intFromPtr(&this.data) + this.bump_idx });
-            var alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
+            const alloc = @as(*T, @ptrFromInt(@intFromPtr(&this.data) + this.bump_idx));
             this.bump_idx += size;
             return @ptrCast(@alignCast(alloc));
         }
@@ -148,11 +148,11 @@ const Page = struct {
                 allocLog("thread {} local marking {*} as local normal page\n", .{ std.Thread.getCurrentId(), this });
                 this.bump_idx -= 1;
 
-                if (this.thread_free.tryCompareAndSwap(
+                if (this.thread_free.cmpxchgWeak(
                     @ptrFromInt(@intFromEnum(PageStates.FULL)),
                     @ptrFromInt(@intFromEnum(PageStates.NORMAL)),
-                    std.atomic.Ordering.Monotonic,
-                    std.atomic.Ordering.Monotonic,
+                    .monotonic,
+                    .monotonic,
                 ) == null) {
                     allocLog("thread {} local marking {*} as thread normal page\n", .{ std.Thread.getCurrentId(), this });
                     // return page to available to allocate state
@@ -165,7 +165,7 @@ const Page = struct {
 
         allocLog("thread {} thread freeing in {*}\n", .{ std.Thread.getCurrentId(), this });
         while (true) {
-            block.next = this.thread_free.load(std.atomic.Ordering.Monotonic);
+            block.next = this.thread_free.load(.monotonic);
             // page is in full mode
             if (@intFromPtr(block.next) == @intFromEnum(PageStates.FULL)) {
                 // attempt to return page to empty state & append to size class thread list
@@ -175,11 +175,11 @@ const Page = struct {
             }
 
             // push allocation to page thread free
-            if (this.thread_free.tryCompareAndSwap(
+            if (this.thread_free.cmpxchgWeak(
                 block.next,
                 block,
-                std.atomic.Ordering.Release,
-                std.atomic.Ordering.Monotonic,
+                .release,
+                .monotonic,
             ) == null) {
                 break;
             }
@@ -188,7 +188,7 @@ const Page = struct {
     }
 
     fn reclaimThreadFree(this: *This) ?*align(1) Block {
-        const value = this.thread_free.swap(null, std.atomic.Ordering.Acquire);
+        const value = this.thread_free.swap(null, .acquire);
         const ivalue = @intFromPtr(value);
         if (ivalue == @intFromEnum(PageStates.FULL) or ivalue == @intFromEnum(PageStates.QUEUEING)) {
             return null;
@@ -214,11 +214,11 @@ const Page = struct {
         this.threadGuard();
         this.bump_idx = bumpMarkerFullPage;
         // mark page as full, if the page has items in the free list (thread_free != 0) it is not full anymore
-        if (this.thread_free.compareAndSwap(
+        if (this.thread_free.cmpxchgStrong(
             @ptrFromInt(0),
             @ptrFromInt(@intFromEnum(PageStates.FULL)),
-            std.atomic.Ordering.Release,
-            std.atomic.Ordering.Monotonic,
+            .release,
+            .monotonic,
         )) |_| {
             this.bump_idx -= 1;
             this.collect();
@@ -229,11 +229,11 @@ const Page = struct {
 
     fn threadReturnToSizeClass(this: *This, block: *align(1) Block) bool {
         // acquire queueing lock to add this page back to thread local heap
-        if (this.thread_free.tryCompareAndSwap(
+        if (this.thread_free.cmpxchgWeak(
             @ptrFromInt(@intFromEnum(PageStates.FULL)),
             @ptrFromInt(@intFromEnum(PageStates.QUEUEING)),
-            std.atomic.Ordering.Monotonic,
-            std.atomic.Ordering.Monotonic,
+            .monotonic,
+            .monotonic,
         )) |_| {
             // this page was already added to the thread local heap
             return false;
@@ -243,20 +243,20 @@ const Page = struct {
         // atomically push to thread_delayed stack
         while (true) {
             var size_class = this.size_class orelse unreachable;
-            const head = size_class.thread_delayed.load(std.atomic.Ordering.Monotonic);
+            const head = size_class.thread_delayed.load(.monotonic);
             block.next = head;
-            if (size_class.thread_delayed.tryCompareAndSwap(
+            if (size_class.thread_delayed.cmpxchgWeak(
                 head,
                 block,
-                std.atomic.Ordering.Release,
-                std.atomic.Ordering.Monotonic,
+                .release,
+                .monotonic,
             ) == null) {
                 break;
             }
         }
         allocLog("thread {} thread marking normal {*}\n", .{ std.Thread.getCurrentId(), this });
         // return page to normal operation
-        this.thread_free.store(@ptrFromInt(@intFromEnum(PageStates.NORMAL)), std.atomic.Ordering.Monotonic);
+        this.thread_free.store(@ptrFromInt(@intFromEnum(PageStates.NORMAL)), .monotonic);
         return true;
     }
 };
@@ -264,14 +264,14 @@ const Page = struct {
 const SizeClass = struct {
     pages: ?*Page,
     global_allocator: *GlobalAllocator,
-    thread_delayed: std.atomic.Atomic(?*align(1) Block),
+    thread_delayed: std.atomic.Value(?*align(1) Block),
     _block1: CachelineBlocker(40),
 
     const This = @This();
     pub fn init(global_alloc: *GlobalAllocator) This {
         return This{
             .pages = @ptrFromInt(0),
-            .thread_delayed = std.atomic.Atomic(?*align(1) Block).init(null),
+            .thread_delayed = std.atomic.Value(?*align(1) Block).init(null),
             .global_allocator = global_alloc,
             ._block1 = CachelineBlocker(40).init(),
         };
@@ -378,7 +378,7 @@ const SizeClass = struct {
 
     fn deferedFrees(this: *This) void {
         allocLog("thread {} allocating slow in size class {*} reclaiming defered frees\n", .{ std.Thread.getCurrentId(), this });
-        var maybe_delayed = this.thread_delayed.swap(@ptrFromInt(0), std.atomic.Ordering.Acquire);
+        var maybe_delayed = this.thread_delayed.swap(@ptrFromInt(0), .acquire);
         while (maybe_delayed) |delayed| {
             const next = delayed.next;
             const maybe_page = this.global_allocator.pageOfPtr(@intFromPtr(delayed));
@@ -412,14 +412,14 @@ fn msbOnly(const_size: usize) usize {
 }
 
 fn roundToClassSize(size: usize) usize {
-    var baseClass = msbOnly(size);
+    const baseClass = msbOnly(size);
     const stepSize = baseClass / 4;
     const steps = ((size - baseClass) + stepSize - 1) / stepSize; // roundup div
     return baseClass + steps * stepSize;
 }
 
 fn sizeClassOf(size: usize) usize {
-    var baseClass = msbOnly(size);
+    const baseClass = msbOnly(size);
     const stepSize = baseClass / 4;
     const steps = ((size - baseClass) + stepSize - 1) / stepSize; // roundup div
     return (63 - @clz(baseClass >> 3)) * 4 + steps;
@@ -467,7 +467,7 @@ pub const LocalAllocator = struct {
 
 pub const GlobalAllocator = struct {
     pages: []Page,
-    free_pages: std.atomic.Atomic(?*Page),
+    free_pages: std.atomic.Value(?*Page),
     const This = @This();
 
     pub fn init(pages: u64, backing_allocator: std.mem.Allocator) std.mem.Allocator.Error!This {
@@ -483,7 +483,7 @@ pub const GlobalAllocator = struct {
         }
         return This{
             .pages = heap_pages,
-            .free_pages = std.atomic.Atomic(?*Page).init(&heap_pages[0]),
+            .free_pages = std.atomic.Value(?*Page).init(&heap_pages[0]),
         };
     }
 
@@ -502,34 +502,34 @@ pub const GlobalAllocator = struct {
 
     pub fn requestFreePage(this: *This) ?*Page {
         // atomic pop from the queue
-        var head = this.free_pages.load(std.atomic.Ordering.Acquire);
+        var head = this.free_pages.load(.acquire);
         while (head) |head_page| {
-            if (this.free_pages.compareAndSwap(
+            if (this.free_pages.cmpxchgStrong(
                 head_page,
                 head_page.next_page,
-                std.atomic.Ordering.Monotonic,
-                std.atomic.Ordering.Monotonic,
+                .monotonic,
+                .monotonic,
             ) == null) {
                 head_page.clear();
                 return head_page;
             }
-            head = this.free_pages.load(std.atomic.Ordering.Acquire);
+            head = this.free_pages.load(.acquire);
         }
         return null;
     }
 
     pub fn freePage(this: *This, page: *Page) void {
         // atomic push to the queue
-        var head = this.free_pages.load(std.atomic.Ordering.Monotonic);
+        var head = this.free_pages.load(.monotonic);
         page.clear();
         page.setNextPage(head);
-        while (this.free_pages.compareAndSwap(
+        while (this.free_pages.cmpxchgStrong(
             head,
             page,
-            std.atomic.Ordering.Release,
-            std.atomic.Ordering.Monotonic,
+            .release,
+            .monotonic,
         ) != null) {
-            head = this.free_pages.load(std.atomic.Ordering.Monotonic);
+            head = this.free_pages.load(.monotonic);
             page.setNextPage(head);
         }
     }
@@ -551,7 +551,7 @@ test "alloc.Page" {
 
     std.debug.print(" Local alloc\n", .{});
     var s1 = localloc.allocate([17]u8).?;
-    var s2 = localloc.allocate([17]u8).?;
+    const s2 = localloc.allocate([17]u8).?;
     var s3 = localloc.allocate([17]u8).?;
     const s = "1234567890abcdefg";
     s1.* = s.*;

@@ -20,9 +20,9 @@ const ExecutionState = struct {
 };
 
 fn setaffinity(workerid: usize, spacing: usize) !void {
-    var set: std.os.cpu_set_t = undefined;
+    var set: std.posix.cpu_set_t = undefined;
     @memset(&set, 0);
-    std.debug.assert(std.os.CPU_COUNT(set) == 0);
+    std.debug.assert(std.posix.CPU_COUNT(set) == 0);
     var bit = workerid * spacing;
     var idx: usize = 0;
     while (bit >= 64) : (bit -= 64) {
@@ -30,8 +30,8 @@ fn setaffinity(workerid: usize, spacing: usize) !void {
     }
     const one: usize = 1;
     set[idx] |= one << @as(u6, @intCast(bit));
-    std.debug.assert(std.os.CPU_COUNT(set) == 1);
-    const rc = std.os.linux.syscall3(.sched_setaffinity, 0, @sizeOf(std.os.cpu_set_t), @intFromPtr(&set));
+    std.debug.assert(std.posix.CPU_COUNT(set) == 1);
+    const rc = std.os.linux.syscall3(.sched_setaffinity, 0, @sizeOf(std.posix.cpu_set_t), @intFromPtr(&set));
     if (@as(isize, @bitCast(rc)) < 0) return error.UnableToSetSchedAffinity;
     std.debug.print("Pinned worker {} to cpu {} = {}\n", .{ workerid, workerid * spacing, one << @as(u6, @intCast(bit)) });
 }
@@ -119,7 +119,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
             return .Incomplete;
         }
 
-        var resp_value = resp.parseResp(s.client.recvbuffer.dataReady(), 0, s.allocator) catch |err| {
+        const resp_value = resp.parseResp(s.client.recvbuffer.dataReady(), 0, s.allocator) catch |err| {
             _ = s.client.sendbuffer.push("-");
             _ = s.client.sendbuffer.push(@errorName(err));
             _ = s.client.sendbuffer.push("\r\n");
@@ -139,7 +139,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
                     if (s.transaction_prep == 1) {
                         var tx: *commands.MultiState = &s.transaction.?.state;
 
-                        var exec = tx.addCommand(list.*) catch |err| {
+                        const exec = tx.addCommand(list.*) catch |err| {
                             std.debug.print("TX add command: {s}\n", .{@errorName(err)});
                             _ = s.client.sendbuffer.push("-");
                             _ = s.client.sendbuffer.push(@errorName(err));
@@ -182,7 +182,7 @@ const ExecutionMachine = state.Machine(ExecutionState, void, struct {
 
                 // the transaction takes ownership of vv.value so we cannot dealloc it if it was eaten.
                 defer list.deinit(s.allocator);
-                var vlist = list;
+                const vlist = list;
 
                 if (commands.CommandState.init(s.data, vlist, s.now, s.allocator)) |comm_state| {
                     const command = commands.CommandMachine.init(comm_state);
@@ -285,32 +285,32 @@ const Config = struct {
     port: usize = 3456,
 };
 
-fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, status: *std.atomic.Atomic(u64), config: Config) void {
+fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id: usize, status: *std.atomic.Value(u64), config: Config) void {
     if (config.affinity_spacing > 0) {
         setaffinity(worker_id, config.affinity_spacing) catch {
             std.debug.print("Couldn't set affinity\n", .{});
-            std.os.exit(0);
+            std.process.exit(0);
         };
     }
 
     var la = alloc.LocalAllocator.init(allocator);
-    var ctxpool = io.ContextPool.createPool(config.io_contexts, config.recv_buffer_size, config.send_buffer_size, std.heap.page_allocator) catch |err| {
+    const ctxpool = io.ContextPool.createPool(config.io_contexts, config.recv_buffer_size, config.send_buffer_size, std.heap.page_allocator) catch |err| {
         std.debug.print("#{} failed to allocate IO Context pool: {s}\n", .{ worker_id, @errorName(err) });
-        std.os.exit(0);
+        std.process.exit(0);
     };
     var ring: io.IOServer = io.IOServer.init(ctxpool, @intCast(config.queue_depth)) catch |err| {
         std.debug.print("#{} failed to setup IO Uring: {s}\n", .{ worker_id, @errorName(err) });
-        std.os.exit(0);
+        std.process.exit(0);
     };
 
     ring.bind(@intCast(config.port)) catch |err| {
         std.debug.print("#{} failed to bind Server: {s}\n", .{ worker_id, @errorName(err) });
-        std.os.exit(0);
+        std.process.exit(0);
     };
 
     var evt_loop = EventLoop().init(config.event_loop_limit, std.heap.page_allocator) catch |err| {
         std.debug.print("#{} failed to setup event loop: {s}\n", .{ worker_id, @errorName(err) });
-        std.os.exit(0);
+        std.process.exit(0);
     };
 
     std.debug.print("#{} Ring started\n", .{worker_id});
@@ -321,7 +321,7 @@ fn worker(allocator: *alloc.GlobalAllocator, data: *map.ExtendibleMap, worker_id
     while (true) {
         // report the worker status in an atomic int
         wstatus.sleep = cansleep;
-        status.store(wstatus.toInt(), std.atomic.Ordering.Monotonic);
+        status.store(wstatus.toInt(), .monotonic);
 
         var iterator = ring.work(cansleep) catch |err| {
             std.debug.print("#{} Failed to submit ring = {s}\n", .{ worker_id, @errorName(err) });
@@ -563,13 +563,13 @@ pub fn main() !void {
     try data.setup(config.max_expansions, std.heap.page_allocator, &la);
 
     var threads: [10000]std.Thread = undefined; // who cares
-    var status: [10000]std.atomic.Atomic(u64) = undefined;
+    var status: [10000]std.atomic.Value(u64) = undefined;
     for (0..config.thread_count) |thread_num| {
         std.debug.print("Spawning thread nr. {}\n", .{thread_num});
-        status[thread_num] = std.atomic.Atomic(u64).init(0);
+        status[thread_num] = std.atomic.Value(u64).init(0);
         threads[thread_num] = std.Thread.spawn(.{}, worker, .{ &ga, &data, thread_num, &status[thread_num], config }) catch |err| {
             std.debug.print("Failed to spawn thread: {s}\n", .{@errorName(err)});
-            std.os.exit(1);
+            std.process.exit(1);
         };
     }
 
@@ -578,7 +578,7 @@ pub fn main() !void {
         while (true) {
             _ = try std.io.getStdIn().read(&arr);
             for (0..config.thread_count) |thread| {
-                const w = status[thread].load(std.atomic.Ordering.Monotonic);
+                const w = status[thread].load(.monotonic);
                 const wstatus = WorkerStatus.fromInt(w);
                 std.debug.print("Thread {}, sleep = {}, connections = {}, event loop = {}\n", .{ thread, wstatus.sleep, wstatus.connection_count, wstatus.event_loop });
             }
